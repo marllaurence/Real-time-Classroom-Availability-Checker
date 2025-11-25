@@ -2,6 +2,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
+  Alert,
   FlatList,
   Modal,
   ScrollView, StatusBar,
@@ -10,6 +11,7 @@ import {
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AiScheduleInput from '../../components/AiScheduleInput'; // NEW IMPORT
 import CustomModal from '../../components/CustomModal';
 import { addSchedule } from '../../services/schedule';
 
@@ -23,16 +25,19 @@ const MINUTES = ['00', '05', '10', '15', '20', '25', '30', '35', '40', '45', '50
 
 export default function AddSchedule() {
   const router = useRouter();
-  const { roomId, roomName } = useLocalSearchParams(); 
+  const { roomId, roomName, prefillStartTime } = useLocalSearchParams(); 
 
   const [subject, setSubject] = useState('');
   const [professor, setProfessor] = useState('');
   const [day, setDay] = useState('Monday');
   
-  // Time State
-  const [startTime, setStartTime] = useState('09:00'); // Default
-  const [startPeriod, setStartPeriod] = useState('AM');
-  const [endTime, setEndTime] = useState('10:30'); // Default
+  // Time State (Handling prefill if coming from dashboard tap)
+  const initialStart = prefillStartTime ? (prefillStartTime as string).split(' ')[0] : '09:00';
+  const initialPeriod = prefillStartTime ? (prefillStartTime as string).split(' ')[1] : 'AM';
+
+  const [startTime, setStartTime] = useState(initialStart); 
+  const [startPeriod, setStartPeriod] = useState(initialPeriod);
+  const [endTime, setEndTime] = useState('10:30'); 
   const [endPeriod, setEndPeriod] = useState('AM');
 
   // UI States for Modals
@@ -40,8 +45,8 @@ export default function AddSchedule() {
   
   // Time Picker States
   const [showTimePicker, setShowTimePicker] = useState(false);
-  const [pickerMode, setPickerMode] = useState<'start' | 'end'>('start'); // Which time are we editing?
-  const [pickerStep, setPickerStep] = useState<'hour' | 'minute'>('hour'); // Are we picking hour or minute?
+  const [pickerMode, setPickerMode] = useState<'start' | 'end'>('start'); 
+  const [pickerStep, setPickerStep] = useState<'hour' | 'minute'>('hour'); 
   const [tempHour, setTempHour] = useState('');
 
   // Alert Modal States
@@ -52,6 +57,41 @@ export default function AddSchedule() {
 
   const showModal = (type: 'success' | 'error', title: string, msg: string) => {
     setModalType(type); setModalTitle(title); setModalMessage(msg); setModalVisible(true);
+  };
+
+  // --- AI MAGIC FILL HANDLER ---
+  const handleAiFill = (data: any) => {
+    let filledCount = 0;
+
+    if (data.subject) { setSubject(data.subject); filledCount++; }
+    if (data.professor) { setProfessor(data.professor); filledCount++; }
+    if (data.day) { setDay(data.day); filledCount++; }
+    
+    // Handle Start Time from AI (e.g., "09:00 AM")
+    if (data.startTime) {
+      const [time, period] = data.startTime.split(' ');
+      if (time && period) {
+        setStartTime(time);
+        setStartPeriod(period);
+        filledCount++;
+      }
+    }
+
+    // Handle End Time from AI
+    if (data.endTime) {
+      const [time, period] = data.endTime.split(' ');
+      if (time && period) {
+        setEndTime(time);
+        setEndPeriod(period);
+        filledCount++;
+      }
+    }
+
+    if (filledCount > 0) {
+      Alert.alert("Magic Fill ✨", `AI auto-filled ${filledCount} fields! Review before saving.`);
+    } else {
+      Alert.alert("AI Tip", "Try being more specific, e.g. 'Math class on Monday 9am to 10am'");
+    }
   };
 
   const openTimePicker = (mode: 'start' | 'end') => {
@@ -141,7 +181,7 @@ export default function AddSchedule() {
         </View>
       </Modal>
 
-      {/* --- TIME PICKER MODAL (New!) --- */}
+      {/* --- TIME PICKER MODAL --- */}
       <Modal visible={showTimePicker} transparent={true} animationType="slide" onRequestClose={() => setShowTimePicker(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.timePickerContainer}>
@@ -183,6 +223,11 @@ export default function AddSchedule() {
       <View style={styles.contentContainer}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           
+          {/* AI MAGIC INPUT */}
+          <View style={{ marginBottom: 20 }}>
+             <AiScheduleInput onAiFill={handleAiFill} />
+          </View>
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Subject Code</Text>
             <View style={styles.inputWrapper}>

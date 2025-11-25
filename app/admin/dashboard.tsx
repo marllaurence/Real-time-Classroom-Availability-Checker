@@ -1,8 +1,9 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  FlatList,
+  ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StatusBar,
@@ -13,11 +14,14 @@ import {
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import BackgroundView from '../../components/BackgroundView';
+import ClassActionModal from '../../components/ClassActionModal';
 import CustomModal from '../../components/CustomModal';
+import WeekCalendar from '../../components/WeekCalendar';
+import { parseNaturalQuery } from '../../services/aiSearch';
 import { deleteClassroom, getClassrooms } from '../../services/classroom';
+import { deleteSchedule, getSchedulesByDay } from '../../services/schedule';
+import { getRoomStatus } from '../../services/status';
 
-// Updated Filter List to match room types
 const FILTER_TYPES = [
   'All', 
   'Lecture Hall', 
@@ -29,6 +33,34 @@ const FILTER_TYPES = [
   'Conference Room'
 ];
 
+// CONFIGURATION
+const START_HOUR = 7; // 7:00 AM
+const END_HOUR = 18;   // 6:00 PM
+const HOUR_HEIGHT = 100; 
+const ROOM_WIDTH = 180;  
+
+// MODERN PALETTE
+const COLORS = {
+  gridLine: '#f0f0f0',
+  timeLabel: '#9aa0a6',
+  
+  availableBg: '#f0fff4', 
+  availableBorder: '#dcfce7',
+
+  occupiedBg: '#ef4444',     
+  occupiedBorder: '#b91c1c', 
+  occupiedText: '#ffffff',   
+
+  maintenanceBg: '#fff7ed',
+  maintenanceText: '#c2410c',
+  
+  currentLine: '#ea4335',
+  headerBg: '#ffffff',
+  headerText: '#1f2937',
+  subText: '#6b7280',
+  primary: '#004aad'
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const [rooms, setRooms] = useState<any[]>([]);
@@ -36,293 +68,494 @@ export default function AdminDashboard() {
   const [search, setSearch] = useState('');
   const [selectedFilter, setSelectedFilter] = useState('All');
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedDay, setSelectedDay] = useState('Monday');
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [isAiLoading, setIsAiLoading] = useState(false);
 
-  // --- MODAL STATE ---
+  // Modal State (General - Delete Room)
   const [modalVisible, setModalVisible] = useState(false);
   const [modalType, setModalType] = useState<'success' | 'error' | 'info'>('info');
   const [modalTitle, setModalTitle] = useState('');
   const [modalMessage, setModalMessage] = useState('');
   const [selectedRoomId, setSelectedRoomId] = useState<number | null>(null);
 
-  useFocusEffect(
-    useCallback(() => {
-      loadRooms();
-    }, [])
-  );
+  // Class Action Modal State (Manage Schedule)
+  const [classModalVisible, setClassModalVisible] = useState(false);
+  const [selectedClass, setSelectedClass] = useState<any>(null);
+  const [selectedRoomForClass, setSelectedRoomForClass] = useState<any>(null);
+
+  useEffect(() => {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const today = days[new Date().getDay()];
+    if (today !== 'Saturday' && today !== 'Sunday') setSelectedDay(today);
+
+    const timer = setInterval(() => setCurrentTime(new Date()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useFocusEffect(useCallback(() => { loadRooms(); }, [selectedDay]));
 
   const loadRooms = () => {
     const data = getClassrooms();
-    setRooms(data);
-    applyFilters(search, selectedFilter, data);
+    const dataWithStatus = data.map(room => {
+      const statusInfo = getRoomStatus(room.id, selectedDay);
+      const dailySchedule = getSchedulesByDay(room.id, selectedDay);
+      return { ...room, ...statusInfo, dailySchedule };
+    });
+    setRooms(dataWithStatus);
+    applyFilters(search, selectedFilter, dataWithStatus);
   };
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    loadRooms();
-    setRefreshing(false);
-  };
+  const onRefresh = () => { setRefreshing(true); loadRooms(); setRefreshing(false); };
 
-  // --- FILTER LOGIC ---
   const applyFilters = (searchText: string, filterType: string, sourceData = rooms) => {
     let result = sourceData;
-    
     if (filterType !== 'All') {
       result = result.filter(room => room.type.toLowerCase().includes(filterType.toLowerCase()));
     }
-
     if (searchText) {
-      result = result.filter(room => 
-        room.name.toLowerCase().includes(searchText.toLowerCase()) ||
-        room.type.toLowerCase().includes(searchText.toLowerCase())
-      );
+      result = result.filter(room => room.name.toLowerCase().includes(searchText.toLowerCase()) || room.type.toLowerCase().includes(searchText.toLowerCase()));
     }
-
     setFilteredRooms(result);
   };
 
-  const handleSearch = (text: string) => {
-    setSearch(text);
-    applyFilters(text, selectedFilter);
-  };
+  const handleSearch = (text: string) => { setSearch(text); applyFilters(text, selectedFilter); };
+  const handleFilterPress = (type: string) => { setSelectedFilter(type); applyFilters(search, type); };
 
-  const handleFilterPress = (type: string) => {
-    setSelectedFilter(type);
-    applyFilters(search, type);
-  };
+  // --- AI SEARCH ---
+  const handleMagicSearch = async () => {
+    if (!search.trim()) return;
+    
+    setIsAiLoading(true);
+    const result = await parseNaturalQuery(search);
+    setIsAiLoading(false);
 
-  // --- DELETE LOGIC ---
-  const handleDeletePress = (id: number) => {
-    setSelectedRoomId(id);
-    setModalType('error');
-    setModalTitle('Delete Room?');
-    setModalMessage('This action cannot be undone and will delete all associated schedules.');
-    setModalVisible(true);
-  };
-
-  const confirmDelete = () => {
-    if (selectedRoomId) {
-      deleteClassroom(selectedRoomId);
-      loadRooms();
+    if (result) {
+      if (result.day) setSelectedDay(result.day);
+      if (result.filterType && FILTER_TYPES.includes(result.filterType)) {
+        setSelectedFilter(result.filterType);
+        applyFilters(result.searchKeyword || '', result.filterType);
+      } else {
+        applyFilters(result.searchKeyword || '', selectedFilter);
+      }
+      if (result.searchKeyword) setSearch(result.searchKeyword);
+      else setSearch('');
+    } else {
+      Alert.alert("AI Error", "Could not understand the query. Please try again.");
     }
   };
 
-  const renderRoom = ({ item }: { item: any }) => (
-    <TouchableOpacity 
-      activeOpacity={0.9}
-      style={styles.card}
-      onPress={() => router.push({
-        pathname: '/admin/room-details',
-        params: { 
-          roomId: item.id, 
-          roomName: item.name, 
-          roomCapacity: item.capacity, 
-          roomType: item.type,
-          equipment: item.equipment 
-        }
-      } as any)}
-    >
-      <View style={styles.cardContent}>
-        <View style={styles.iconContainer}>
-          <MaterialIcons name="meeting-room" size={24} color="#004aad" />
-        </View>
-        <View>
-          <Text style={styles.roomName}>{item.name}</Text>
-          <Text style={styles.roomDetails}>{item.type} • {item.capacity} Seats</Text>
-        </View>
-      </View>
-      
-      <View style={styles.actions}>
-        <TouchableOpacity 
-          onPress={() => router.push({
-            pathname: '/admin/add-room',
-            params: { 
-              id: item.id, 
-              name: item.name, 
-              capacity: item.capacity, 
-              type: item.type,
-              status: item.status,
-              equipment: item.equipment
-            }
-          } as any)}
-          style={{ marginRight: 12 }}
-        >
-          <MaterialIcons name="edit" size={22} color="#38b6ff" />
-        </TouchableOpacity>
+  // --- ROOM ACTIONS ---
+  const handleDeleteRoomPress = (id: number) => {
+    setSelectedRoomId(id);
+    setModalType('error'); 
+    setModalTitle('Delete Room?'); 
+    setModalMessage('This action cannot be undone.'); 
+    setModalVisible(true);
+  };
 
-        <TouchableOpacity onPress={() => handleDeletePress(item.id)}>
-          <MaterialIcons name="delete-outline" size={22} color="#ef4444" />
-        </TouchableOpacity>
+  const confirmDeleteRoom = () => {
+    if (selectedRoomId) { deleteClassroom(selectedRoomId); loadRooms(); }
+  };
+
+  // --- CLASS ACTIONS ---
+  const handleClassPress = (room: any, scheduleItem: any) => {
+    setSelectedRoomForClass(room);
+    setSelectedClass({ ...scheduleItem, roomName: room.name });
+    setClassModalVisible(true);
+  };
+
+  const confirmDeleteClass = () => {
+    if (selectedClass) {
+      try {
+        deleteSchedule(selectedClass.id); 
+        setClassModalVisible(false);
+        loadRooms();
+        Alert.alert("Success", "Class deleted successfully.");
+      } catch (e) {
+        Alert.alert("Error", "Could not delete class.");
+      }
+    }
+  };
+
+  const triggerEditClass = () => {
+    setClassModalVisible(false);
+    handleEditClass(selectedRoomForClass, selectedClass);
+  };
+
+  // Navigate to ADD-SCHEDULE
+  const handleAddClassToSlot = (room: any, hour: number) => {
+    const startStr = `${hour > 12 ? hour - 12 : hour}:00 ${hour >= 12 ? 'PM' : 'AM'}`;
+    const endStr = `${hour + 1 > 12 ? hour + 1 - 12 : hour + 1}:00 ${hour + 1 >= 12 ? 'PM' : 'AM'}`;
+
+    router.push({ 
+      pathname: '/admin/add-schedule', 
+      params: { 
+        roomId: room.id,
+        roomName: room.name,
+        startTime: startStr,
+        endTime: endStr,
+        day: selectedDay 
+      } 
+    } as any);
+  };
+
+  // Navigate to ADD-SCHEDULE (Edit Mode)
+  const handleEditClass = (room: any, scheduleItem: any) => {
+    router.push({ 
+      pathname: '/admin/add-schedule', 
+      params: { 
+        roomId: room.id,
+        roomName: room.name,
+        id: scheduleItem.id, 
+        subject: scheduleItem.subject,
+        professor: scheduleItem.professor,
+        startTime: scheduleItem.startTime,
+        endTime: scheduleItem.endTime,
+        day: selectedDay
+      } 
+    } as any);
+  };
+
+  const parseTime = (timeStr: string) => {
+    if (!timeStr) return 0;
+    const [time, modifier] = timeStr.split(' ');
+    let [hours, minutes] = time.split(':').map(Number);
+    if (hours === 12 && modifier === 'AM') hours = 0;
+    if (hours !== 12 && modifier === 'PM') hours += 12;
+    return hours + minutes / 60;
+  };
+
+  const getRoomIcon = (type: string) => {
+    const t = type.toLowerCase();
+    if (t.includes('computer')) return <MaterialIcons name="computer" size={18} color={COLORS.primary} />;
+    if (t.includes('lab')) return <FontAwesome5 name="flask" size={16} color={COLORS.primary} />;
+    if (t.includes('lecture')) return <MaterialIcons name="class" size={18} color={COLORS.primary} />;
+    return <MaterialIcons name="room" size={18} color={COLORS.primary} />;
+  };
+
+  const renderScheduler = () => {
+    const hours = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => START_HOUR + i);
+    const currentHour = currentTime.getHours() + currentTime.getMinutes() / 60;
+    const currentLineTop = (currentHour - START_HOUR) * HOUR_HEIGHT;
+    const showCurrentLine = currentHour >= START_HOUR && currentHour <= END_HOUR;
+
+    return (
+      <View style={styles.schedulerContainer}>
+        {/* 1. Left Fixed Column: Time Labels */}
+        <View style={styles.timeColumn}>
+           <View style={{ height: 70, borderBottomWidth: 1, borderBottomColor: COLORS.gridLine, backgroundColor: '#fff' }} /> 
+           {hours.map((hour) => (
+             <View key={hour} style={styles.timeLabelContainer}>
+               <Text style={styles.timeLabel}>
+                 {hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}
+               </Text>
+             </View>
+           ))}
+        </View>
+
+        {/* 2. Right Scrollable Area: Rooms */}
+        <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
+           <View>
+             {/* Room Headers */}
+             <View style={styles.roomHeaderRow}>
+               {filteredRooms.map((room) => (
+                 <View key={room.id} style={styles.roomHeaderCell}>
+                   <View style={styles.headerTopRow}>
+                      <View style={styles.roomIconBg}>{getRoomIcon(room.type)}</View>
+                      <View style={styles.headerActions}>
+                         <TouchableOpacity onPress={() => router.push({ pathname: '/admin/add-room', params: room } as any)} style={styles.miniIconBtn}>
+                           <MaterialIcons name="edit" size={14} color="#6b7280" />
+                         </TouchableOpacity>
+                         <TouchableOpacity onPress={() => handleDeleteRoomPress(room.id)} style={styles.miniIconBtn}>
+                           <MaterialIcons name="delete" size={14} color="#ef4444" />
+                         </TouchableOpacity>
+                      </View>
+                   </View>
+                   
+                   <TouchableOpacity onPress={() => router.push({ pathname: '/admin/room-details', params: { roomId: room.id, roomName: room.name, roomCapacity: room.capacity, roomType: room.type, equipment: room.equipment } } as any)}>
+                     <Text style={styles.roomHeaderText} numberOfLines={1}>{room.name}</Text>
+                     <Text style={styles.roomCapacityText}>{room.type} • {room.capacity} seats</Text>
+                   </TouchableOpacity>
+                 </View>
+               ))}
+             </View>
+
+             {/* Grid Body */}
+             <View style={styles.gridBody}>
+                <View style={styles.gridLinesContainer}>
+                   {hours.map((h, i) => (
+                     <View key={i} style={styles.gridLine} />
+                   ))}
+                </View>
+                
+                <View style={styles.roomColumnsContainer}>
+                  {filteredRooms.map((room) => {
+                    const isMaintenance = room.status === 'Maintenance';
+                    return (
+                      <View key={room.id} style={styles.roomColumn}>
+                         
+                         {/* AVAILABLE SLOTS */}
+                         {!isMaintenance && (
+                           <View style={[StyleSheet.absoluteFill, { backgroundColor: COLORS.availableBg }]}>
+                             {hours.map((h, i) => (
+                               <View key={i} style={{ height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.availableBorder, borderStyle: 'dashed' }} />
+                             ))}
+                           </View>
+                         )}
+
+                         {/* ADD CLASS TOUCH TARGETS */}
+                         {!isMaintenance && hours.map((hour) => (
+                           <TouchableOpacity 
+                              key={hour}
+                              style={[styles.emptySlotClickable, { height: HOUR_HEIGHT }]}
+                              onPress={() => handleAddClassToSlot(room, hour)}
+                              activeOpacity={0.6}
+                           />
+                         ))}
+
+                         {/* MAINTENANCE OVERLAY */}
+                         {isMaintenance && (
+                           <View style={styles.maintenanceOverlay}>
+                             <View style={styles.maintenanceBadge}>
+                                <MaterialIcons name="build" size={16} color={COLORS.maintenanceText} />
+                                <Text style={styles.maintenanceText}>Maintenance</Text>
+                             </View>
+                           </View>
+                         )}
+
+                         {/* OCCUPIED CLASS BLOCKS */}
+                         {!isMaintenance && room.dailySchedule && room.dailySchedule.map((sch: any, index: number) => {
+                            const start = parseTime(sch.startTime);
+                            const end = parseTime(sch.endTime);
+                            if (start < START_HOUR || start > END_HOUR) return null;
+
+                            const top = (start - START_HOUR) * HOUR_HEIGHT;
+                            const height = (end - start) * HOUR_HEIGHT;
+
+                            return (
+                              <TouchableOpacity 
+                                key={index} 
+                                style={[styles.eventBlock, { top: top, height: height }]}
+                                onPress={() => handleClassPress(room, sch)}
+                                activeOpacity={0.9}
+                              >
+                                <View style={styles.eventContent}>
+                                  <Text style={styles.eventTitle} numberOfLines={1}>{sch.subject}</Text>
+                                  <View style={styles.eventDetailRow}>
+                                    <MaterialIcons name="person" size={12} color="rgba(255,255,255,0.9)" />
+                                    <Text style={styles.eventDetailText} numberOfLines={1}>
+                                      {sch.professor || "TBD"} 
+                                    </Text>
+                                  </View>
+                                  <View style={styles.eventDetailRow}>
+                                     <MaterialIcons name="access-time" size={12} color="rgba(255,255,255,0.8)" />
+                                     <Text style={styles.eventDetailText}>
+                                       {sch.startTime} - {sch.endTime}
+                                     </Text>
+                                  </View>
+                                </View>
+                              </TouchableOpacity>
+                            );
+                         })}
+                      </View>
+                    );
+                  })}
+                </View>
+
+                {/* NOW LINE */}
+                {showCurrentLine && (
+                  <View style={[styles.currentLine, { top: currentLineTop }]}>
+                    <View style={styles.nowBadge}>
+                      <Text style={styles.nowText}>NOW</Text>
+                    </View>
+                  </View>
+                )}
+             </View>
+           </View>
+        </ScrollView>
       </View>
-    </TouchableOpacity>
-  );
+    );
+  };
 
   return (
-    <BackgroundView>
+    <View style={styles.rootContainer}>
       <StatusBar barStyle="light-content" backgroundColor="#004aad" />
       
-      {/* Custom Modal */}
-      <CustomModal 
-        visible={modalVisible}
-        type={modalType as any}
-        title={modalTitle}
-        message={modalMessage}
-        actionText="Delete"
-        cancelText={modalType === 'error' ? "Cancel" : undefined}
-        onClose={() => setModalVisible(false)}
-        onAction={confirmDelete}
+      {/* Delete Room Modal */}
+      <CustomModal visible={modalVisible} type={modalType as any} title={modalTitle} message={modalMessage} actionText="Delete" cancelText={modalType === 'error' ? "Cancel" : undefined} onClose={() => setModalVisible(false)} onAction={confirmDeleteRoom} />
+      
+      {/* Class Actions Modal */}
+      <ClassActionModal 
+        visible={classModalVisible}
+        data={selectedClass}
+        onClose={() => setClassModalVisible(false)}
+        onEdit={triggerEditClass}
+        onDelete={confirmDeleteClass}
       />
 
-      {/* --- BOLD HEADER SECTION WITH SEARCH --- */}
-      <View style={styles.headerContainer}>
-        <SafeAreaView edges={['top', 'left', 'right']}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={{flex: 1}}>
+        {/* Header with Maintenance Inbox Button */}
+        <View style={styles.headerContent}>
+          <View>
+            <Text style={styles.headerTitle}>Admin Dashboard</Text>
+            <Text style={styles.headerSubtitle}>Manage Rooms & Schedules</Text>
+          </View>
           
-          {/* Title Row */}
-          <View style={styles.headerContent}>
-            <View>
-              <Text style={styles.headerTitle}>Admin Dashboard</Text>
-              <Text style={styles.headerSubtitle}>Manage Rooms & Schedules</Text>
-            </View>
-            <TouchableOpacity onPress={() => router.replace('/auth/login' as any)} style={styles.logoutBtn}>
-              <MaterialIcons name="logout" size={22} color="#004aad" />
+          <View style={{flexDirection: 'row', gap: 10}}>
+            {/* Maintenance Inbox */}
+            <TouchableOpacity 
+              onPress={() => router.push('/admin/maintenance-inbox' as any)} 
+              style={styles.settingsBtn}
+            >
+              <View style={{position:'absolute', top:8, right:8, width:8, height:8, borderRadius:4, backgroundColor:'#ef4444', zIndex:10}} />
+              <MaterialIcons name="notifications-none" size={20} color="#004aad" />
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => router.push('/settings' as any)} style={styles.settingsBtn}>
+              <MaterialIcons name="settings" size={20} color="#004aad" />
             </TouchableOpacity>
           </View>
+        </View>
 
-          {/* Search Bar (Inside Header) */}
-          <View style={styles.searchContainer}>
-            <MaterialIcons name="search" size={24} color="#38b6ff" style={styles.searchIcon} />
-            <TextInput 
-              style={styles.searchInput}
-              placeholder="Search room number..."
-              placeholderTextColor="#8fabc2"
-              value={search}
-              onChangeText={handleSearch}
-            />
-          </View>
-
-        </SafeAreaView>
-      </View>
-
-      <View style={styles.body}>
-        {/* --- FILTER CHIPS --- */}
+        {/* Search Bar */}
+        <View style={styles.searchContainer}>
+          <MaterialIcons name="search" size={24} color="#38b6ff" style={styles.searchIcon} />
+          <TextInput 
+            style={styles.searchInput} 
+            placeholder="Ask AI (e.g., 'Labs free tomorrow')" 
+            placeholderTextColor="#8fabc2" 
+            value={search} 
+            onChangeText={handleSearch} 
+          />
+          <TouchableOpacity onPress={handleMagicSearch} style={{ padding: 8, backgroundColor: '#e0f2fe', borderRadius: 12, marginLeft: 4 }} disabled={isAiLoading}>
+            {isAiLoading ? <ActivityIndicator size="small" color="#004aad" /> : <MaterialIcons name="auto-awesome" size={24} color="#004aad" />}
+          </TouchableOpacity>
+        </View>
+        
+        {/* Filters */}
         <View style={styles.filterContainer}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterScroll}>
             {FILTER_TYPES.map((type) => (
-              <TouchableOpacity 
-                key={type}
-                style={[
-                  styles.filterChip, 
-                  selectedFilter === type && styles.filterChipActive
-                ]}
-                onPress={() => handleFilterPress(type)}
-              >
-                <Text style={[
-                  styles.filterText, 
-                  selectedFilter === type && styles.filterTextActive
-                ]}>
-                  {type}
-                </Text>
+              <TouchableOpacity key={type} style={[styles.filterChip, selectedFilter === type && styles.filterChipActive]} onPress={() => handleFilterPress(type)}>
+                <Text style={[styles.filterText, selectedFilter === type && styles.filterTextActive]}>{type}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
         </View>
 
-        {/* --- ROOM LIST --- */}
-        <FlatList
-          data={filteredRooms}
-          keyExtractor={(item) => item.id.toString()}
-          renderItem={renderRoom}
-          contentContainerStyle={styles.listContainer}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" />
-              <Text style={styles.emptyText}>No classrooms found</Text>
-              <Text style={styles.emptySubText}>Tap the + button to add one.</Text>
-            </View>
-          }
-        />
-      </View>
+        {/* Week Tab */}
+        <WeekCalendar selectedDay={selectedDay} onSelectDay={setSelectedDay} />
 
-      {/* Floating Add Button */}
-      <TouchableOpacity 
-        style={styles.fab} 
-        onPress={() => router.push('/admin/add-room' as any)}
-      >
-        <MaterialIcons name="add" size={32} color="#fff" />
+        {/* Main Scheduler Grid */}
+        <View style={styles.body}>
+           <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />} contentContainerStyle={{ paddingBottom: 80 }} showsVerticalScrollIndicator={false}>
+             {filteredRooms.length > 0 ? renderScheduler() : <View style={styles.emptyState}><MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" /><Text style={styles.emptyText}>No rooms found.</Text></View>}
+           </ScrollView>
+        </View>
+      </SafeAreaView>
+
+      {/* Add Room FAB */}
+      <TouchableOpacity style={styles.fab} onPress={() => router.push('/admin/add-room' as any)}>
+        <MaterialIcons name="add" size={28} color="#fff" />
       </TouchableOpacity>
-
-    </BackgroundView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  /* Header Styles */
-  headerContainer: { 
-    backgroundColor: '#004aad', 
-    borderBottomLeftRadius: 30, 
-    borderBottomRightRadius: 30, 
-    paddingBottom: 25,
-    shadowColor: '#004aad', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 10
-  },
-  headerContent: { 
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', 
-    paddingHorizontal: 24, paddingTop: 20, paddingBottom: 15 
-  },
-  headerTitle: { fontSize: 26, fontWeight: '800', color: '#ffffff' },
-  headerSubtitle: { fontSize: 14, color: '#dbeafe', opacity: 0.9 },
-  logoutBtn: { backgroundColor: '#fff', padding: 10, borderRadius: 14, elevation: 3 },
-
-  /* Search Bar */
-  searchContainer: { 
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', 
-    marginHorizontal: 24, paddingHorizontal: 16, height: 50, 
-    borderRadius: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3
-  },
-  searchIcon: { marginRight: 12 },
-  searchInput: { flex: 1, fontSize: 16, color: '#002855' },
-
-  body: { flex: 1, marginTop: 15 },
-
-  /* Filter Styles */
-  filterContainer: { marginBottom: 10 },
-  filterScroll: { paddingHorizontal: 20, paddingBottom: 10 },
-  filterChip: {
-    paddingHorizontal: 18, paddingVertical: 10, borderRadius: 24, 
-    backgroundColor: 'rgba(255,255,255,0.8)', 
-    marginRight: 10, borderWidth: 1, borderColor: '#bfdbfe' 
-  },
-  filterChipActive: { backgroundColor: '#38b6ff', borderColor: '#38b6ff', elevation: 3 },
-  filterText: { color: '#5b7c99', fontWeight: '700', fontSize: 14 },
-  filterTextActive: { color: '#ffffff' },
-
-  /* List & Cards */
-  listContainer: { padding: 20, paddingBottom: 100 },
+  rootContainer: { flex: 1, backgroundColor: '#004aad' },
+  headerContent: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 10 },
+  headerTitle: { fontSize: 22, fontWeight: '800', color: '#ffffff' },
+  headerSubtitle: { fontSize: 12, color: '#dbeafe', opacity: 0.9 },
+  settingsBtn: { backgroundColor: '#fff', padding: 8, borderRadius: 10 },
   
-  card: {
-    backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 20, padding: 18, marginBottom: 12,
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    shadowColor: '#004aad', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 3,
-    borderWidth: 1, borderColor: '#f0f9ff'
-  },
-  cardContent: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  iconContainer: {
-    width: 48, height: 48, borderRadius: 24, backgroundColor: '#dbeafe',
-    justifyContent: 'center', alignItems: 'center'
-  },
-  roomName: { fontSize: 18, fontWeight: '700', color: '#002855' },
-  roomDetails: { fontSize: 14, color: '#5b7c99', marginTop: 2 },
-  actions: { flexDirection: 'row' },
+  searchContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', marginHorizontal: 20, paddingHorizontal: 16, height: 50, borderRadius: 16, marginBottom: 10 },
+  searchIcon: { marginRight: 10 },
+  searchInput: { flex: 1, fontSize: 16, color: '#002855' },
+  
+  filterContainer: { marginBottom: 5 },
+  filterScroll: { paddingHorizontal: 20, paddingBottom: 5 },
+  filterChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', marginRight: 8 },
+  filterChipActive: { backgroundColor: '#fff' },
+  filterText: { color: '#dbeafe', fontWeight: '600', fontSize: 12 },
+  filterTextActive: { color: '#004aad', fontWeight: 'bold' },
 
-  /* FAB */
-  fab: {
-    position: 'absolute', bottom: 30, right: 24,
-    width: 64, height: 64, borderRadius: 32, backgroundColor: '#004aad',
-    justifyContent: 'center', alignItems: 'center', elevation: 8,
-    shadowColor: '#004aad', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8
-  },
+  body: { flex: 1, backgroundColor: '#ffffff', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
 
-  /* Empty State */
-  emptyState: { alignItems: 'center', marginTop: 60, gap: 10 },
-  emptyText: { fontSize: 18, fontWeight: '600', color: '#5b7c99' },
-  emptySubText: { fontSize: 14, color: '#9ca3af' }
+  /* SCHEDULER LAYOUT */
+  schedulerContainer: { flexDirection: 'row' },
+  
+  timeColumn: { width: 60, borderRightWidth: 1, borderRightColor: COLORS.gridLine, backgroundColor: '#fff', zIndex: 10 },
+  timeLabelContainer: { height: HOUR_HEIGHT, justifyContent: 'flex-start', alignItems: 'flex-end', paddingRight: 8 },
+  timeLabel: { fontSize: 11, color: COLORS.timeLabel, fontWeight: '500', transform: [{translateY: -8}] },
+
+  roomHeaderRow: { flexDirection: 'row', backgroundColor: '#fff' },
+  roomHeaderCell: { 
+    width: ROOM_WIDTH, 
+    height: 70, 
+    justifyContent: 'center', 
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    borderBottomWidth: 1, 
+    borderBottomColor: COLORS.gridLine, 
+    paddingHorizontal: 10,
+    paddingVertical: 8
+  },
+  headerTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, width: '100%' },
+  roomIconBg: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#e0f2fe', justifyContent: 'center', alignItems: 'center' },
+  headerActions: { flexDirection: 'row', gap: 4 },
+  miniIconBtn: { padding: 4, backgroundColor: '#f3f4f6', borderRadius: 4 },
+  
+  roomHeaderText: { fontSize: 14, fontWeight: '700', color: COLORS.headerText },
+  roomCapacityText: { fontSize: 10, color: COLORS.subText, marginTop: 1 },
+
+  gridBody: { position: 'relative' },
+  gridLinesContainer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  gridLine: { height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.gridLine },
+
+  roomColumnsContainer: { flexDirection: 'row' },
+  roomColumn: { 
+    width: ROOM_WIDTH, 
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    position: 'relative', 
+    minHeight: (END_HOUR - START_HOUR + 1) * HOUR_HEIGHT,
+  },
+  
+  emptySlotClickable: { width: '100%', zIndex: 1 },
+
+  maintenanceOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: COLORS.maintenanceBg, justifyContent: 'center', alignItems: 'center', zIndex: 5, opacity: 0.95 },
+  maintenanceBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fff', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: '#fed7aa', shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 2, elevation: 1 },
+  maintenanceText: { color: COLORS.maintenanceText, fontWeight: '700', fontSize: 12 },
+
+  eventBlock: {
+    position: 'absolute',
+    left: 4,
+    right: 4,
+    backgroundColor: COLORS.occupiedBg, 
+    borderRadius: 8,
+    padding: 0,
+    zIndex: 2,
+    overflow: 'hidden',
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.occupiedBorder, 
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4
+  },
+  eventContent: { flex: 1, paddingHorizontal: 8, paddingVertical: 4, justifyContent: 'flex-start', paddingTop: 6 },
+  eventTitle: { color: '#fff', fontSize: 13, fontWeight: '800', marginBottom: 4, textShadowColor: 'rgba(0,0,0,0.1)', textShadowOffset: {width: 0, height: 1}, textShadowRadius: 1 },
+  eventDetailRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  eventDetailText: { color: 'rgba(255,255,255,0.95)', fontSize: 11, fontWeight: '500' },
+
+  currentLine: { position: 'absolute', left: 0, right: 0, height: 2, backgroundColor: COLORS.currentLine, zIndex: 20 },
+  nowBadge: { position: 'absolute', left: -40, top: -9, backgroundColor: COLORS.currentLine, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  nowText: { color: '#fff', fontSize: 9, fontWeight: 'bold' },
+
+  fab: { position: 'absolute', bottom: 30, right: 24, width: 56, height: 56, borderRadius: 28, backgroundColor: '#004aad', justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 5 },
+  emptyState: { alignItems: 'center', marginTop: 80, gap: 10 },
+  emptyText: { fontSize: 16, fontWeight: '600', color: '#5b7c99' }
 });

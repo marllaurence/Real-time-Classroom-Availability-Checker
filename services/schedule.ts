@@ -3,15 +3,12 @@ import { runQuery, runTransaction } from '../db/database';
 // Helper: Convert "09:00 AM" to minutes
 const timeToMinutes = (timeStr: string) => {
   if (!timeStr) return -1;
-  const [time, period] = timeStr.split(' ');
-  
+  const cleanStr = timeStr.trim().toLowerCase().replace(/\s+/g, ' ');
+  const [time, period] = cleanStr.split(' ');
   if (!time || !period) return 0;
-
   let [hours, minutes] = time.split(':').map(Number);
-
-  if (period === 'PM' && hours !== 12) hours += 12;
-  if (period === 'AM' && hours === 12) hours = 0;
-
+  if (period === 'pm' && hours !== 12) hours += 12;
+  if (period === 'am' && hours === 12) hours = 0;
   return hours * 60 + minutes;
 };
 
@@ -20,7 +17,6 @@ export const addSchedule = async (roomId: number, subject: string, professor: st
     if (!subject || !professor || !day || !start || !end) {
       return { success: false, message: 'All fields are required' };
     }
-
     const newStart = timeToMinutes(start);
     const newEnd = timeToMinutes(end);
 
@@ -54,6 +50,14 @@ export const addSchedule = async (roomId: number, subject: string, professor: st
 export const getRoomSchedules = (roomId: number) => {
   try {
     return runQuery('SELECT * FROM schedules WHERE room_id = ? ORDER BY dayOfWeek, startTime', [roomId]);
+  } catch (error) { return []; }
+};
+
+// NEW: Get Schedules for a specific room on a specific day (Sorted)
+export const getSchedulesByDay = (roomId: number, day: string) => {
+  try {
+    const all = runQuery('SELECT * FROM schedules WHERE room_id = ? AND dayOfWeek = ?', [roomId, day]);
+    return all.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
   } catch (error) { return []; }
 };
 

@@ -1,26 +1,42 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  FlatList,
+  ScrollView,
   StatusBar,
   StyleSheet,
-  Text,
-  TouchableOpacity,
+  Text, TouchableOpacity,
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import CustomModal from '../../components/CustomModal';
+import DailyTimeline from '../../components/DailyTimeline';
+import WeekCalendar from '../../components/WeekCalendar';
 import { deleteSchedule, getRoomSchedules } from '../../services/schedule';
 import { getRoomStatus } from '../../services/status';
+
+// Helper: Map keywords to icons
+const getAmenityIcon = (name: string) => {
+  const n = name.toLowerCase().trim();
+  if (n.includes('wifi') || n.includes('internet')) return 'wifi';
+  if (n.includes('projector')) return 'videocam';
+  if (n.includes('tv') || n.includes('monitor')) return 'tv';
+  if (n.includes('ac') || n.includes('air')) return 'ac-unit';
+  if (n.includes('computer') || n.includes('pc')) return 'computer';
+  if (n.includes('sound') || n.includes('speaker')) return 'volume-up';
+  if (n.includes('whiteboard') || n.includes('board')) return 'edit';
+  return 'check-circle'; // Default
+};
 
 export default function RoomDetails() {
   const router = useRouter();
   const { roomId, roomName, roomCapacity, roomType, equipment } = useLocalSearchParams(); 
-  const [schedules, setSchedules] = useState<any[]>([]);
+  
+  const [allSchedules, setAllSchedules] = useState<any[]>([]);
+  const [filteredSchedules, setFilteredSchedules] = useState<any[]>([]);
+  const [selectedDay, setSelectedDay] = useState('Monday');
   const [currentStatus, setCurrentStatus] = useState<any>(null); 
 
-  // Parse Equipment String into Array
   const amenities = equipment ? (equipment as string).split(',').filter(Boolean) : [];
 
   const [modalVisible, setModalVisible] = useState(false);
@@ -29,91 +45,109 @@ export default function RoomDetails() {
   const [modalMessage, setModalMessage] = useState('');
   const [selectedScheduleId, setSelectedScheduleId] = useState<number | null>(null);
 
-  useFocusEffect(useCallback(() => {
-    const id = Number(roomId);
-    setSchedules(getRoomSchedules(id));
-    setCurrentStatus(getRoomStatus(id));
-  }, []));
+  useEffect(() => {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const today = days[new Date().getDay()];
+    if (today !== 'Saturday' && today !== 'Sunday') setSelectedDay(today);
+  }, []);
 
-  const handleDeletePress = (id: number) => {
-    setSelectedScheduleId(id);
-    setModalType('error'); setModalTitle('Remove Class?'); setModalMessage('This removes the class from schedule.'); setModalVisible(true);
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [selectedDay]) 
+  );
+
+  const loadData = () => {
+    const id = Number(roomId);
+    const data = getRoomSchedules(id);
+    setAllSchedules(data);
+    setCurrentStatus(getRoomStatus(id));
+    const filtered = data.filter(item => item.dayOfWeek === selectedDay);
+    setFilteredSchedules(filtered);
+  };
+
+  const handleDaySelect = (day: string) => {
+    setSelectedDay(day);
+    const filtered = allSchedules.filter(item => item.dayOfWeek === day);
+    setFilteredSchedules(filtered);
+  };
+
+  const handleEventPress = (item: any) => {
+    setSelectedScheduleId(item.id);
+    setModalType('error'); 
+    setModalTitle('Remove Class?'); 
+    setModalMessage(`Remove ${item.subject} (${item.startTime})?`); 
+    setModalVisible(true);
   };
 
   const confirmDelete = () => {
     if (selectedScheduleId) {
       deleteSchedule(selectedScheduleId);
-      setSchedules(getRoomSchedules(Number(roomId))); 
-      setCurrentStatus(getRoomStatus(Number(roomId)));
+      loadData(); 
     }
   };
 
-  const renderItem = ({ item }: { item: any }) => (
-    <View style={styles.card}>
-      <View style={styles.timeBox}>
-        <Text style={styles.timeText}>{item.startTime}</Text>
-        <Text style={styles.timeSub}>to</Text>
-        <Text style={styles.timeText}>{item.endTime}</Text>
-      </View>
-      <View style={styles.details}>
-        <Text style={styles.subject}>{item.subject}</Text>
-        <Text style={styles.prof}>{item.professor}</Text>
-        <View style={styles.dayContainer}><MaterialIcons name="calendar-today" size={12} color="#5b7c99" /><Text style={styles.dayBadge}>{item.dayOfWeek}</Text></View>
-      </View>
-      <TouchableOpacity onPress={() => handleDeletePress(item.id)} style={styles.deleteBtn}>
-        <MaterialIcons name="delete-outline" size={22} color="#ef4444" />
-      </TouchableOpacity>
-    </View>
-  );
-
   return (
-    <View style={styles.container}>
+    <View style={styles.rootContainer}>
       <StatusBar barStyle="light-content" backgroundColor="#004aad" />
-      <CustomModal visible={modalVisible} type={modalType as any} title={modalTitle} message={modalMessage} actionText="Remove" cancelText={modalType === 'error' ? "Cancel" : undefined} onClose={() => setModalVisible(false)} onAction={confirmDelete} />
-
-      <View style={styles.headerContainer}>
-        <SafeAreaView edges={['top', 'left', 'right']}>
-          <View style={styles.headerContent}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-              <MaterialIcons name="arrow-back" size={24} color="#004aad" />
-            </TouchableOpacity>
-            <View style={styles.headerTextContainer}>
-              <Text style={styles.headerTitle}>{roomName}</Text>
-              <Text style={styles.headerSubtitle}>{roomType} • Capacity: {roomCapacity}</Text>
-            </View>
-            <View style={{ width: 40 }} /> 
-          </View>
-        </SafeAreaView>
-      </View>
-
-      {currentStatus && (
-        <View style={[styles.statusBanner, { backgroundColor: currentStatus.color }]}>
-          <MaterialIcons name={currentStatus.status === 'Available' ? "check-circle" : "access-time-filled"} size={24} color="white" />
-          <Text style={styles.statusBannerText}>Current Status: {currentStatus.status}</Text>
-        </View>
-      )}
-
-      {/* AMENITIES SECTION (NEW) */}
-      {amenities.length > 0 && (
-        <View style={styles.amenitiesContainer}>
-          <Text style={styles.sectionHeader}>Amenities</Text>
-          <View style={styles.chipRow}>
-            {amenities.map((item, index) => (
-              <View key={index} style={styles.chip}>
-                <MaterialIcons name="check" size={14} color="#004aad" style={{marginRight: 4}} />
-                <Text style={styles.chipText}>{item}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
-
-      <FlatList 
-        data={schedules} keyExtractor={item => item.id.toString()} renderItem={renderItem}
-        contentContainerStyle={styles.list}
-        ListHeaderComponent={<Text style={styles.sectionTitle}>Weekly Schedule</Text>}
-        ListEmptyComponent={<View style={styles.emptyState}><Text style={styles.emptyText}>No classes scheduled yet.</Text></View>}
+      <CustomModal 
+        visible={modalVisible} 
+        type={modalType as any} 
+        title={modalTitle} 
+        message={modalMessage} 
+        actionText="Remove" 
+        cancelText={modalType === 'error' ? "Cancel" : undefined} 
+        onClose={() => setModalVisible(false)} 
+        onAction={confirmDelete} 
       />
+
+      <SafeAreaView edges={['top', 'left', 'right']}>
+        <View style={styles.headerContent}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+            <MaterialIcons name="arrow-back" size={24} color="#004aad" />
+          </TouchableOpacity>
+          <View style={styles.headerTextContainer}>
+            <Text style={styles.headerTitle}>{roomName}</Text>
+            <Text style={styles.headerSubtitle}>{roomType} • Capacity: {roomCapacity}</Text>
+          </View>
+          <View style={{ width: 40 }} /> 
+        </View>
+        <WeekCalendar selectedDay={selectedDay} onSelectDay={handleDaySelect} />
+      </SafeAreaView>
+
+      <View style={styles.body}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 80 }}>
+          
+          {/* Status Banner */}
+          {currentStatus && (
+            <View style={[styles.statusBanner, { backgroundColor: currentStatus.color }]}>
+              <MaterialIcons name={currentStatus.status === 'Available' ? "check-circle" : "access-time-filled"} size={18} color="white" />
+              <Text style={styles.statusBannerText}>{currentStatus.status}</Text>
+            </View>
+          )}
+
+          {/* Improved Amenities Section */}
+          {amenities.length > 0 && (
+            <View style={styles.sectionContainer}>
+              <Text style={styles.sectionHeader}>ROOM EQUIPMENT</Text>
+              <View style={styles.amenitiesGrid}>
+                {amenities.map((item, index) => (
+                  <View key={index} style={styles.amenityChip}>
+                    <View style={styles.amenityIconBox}>
+                      <MaterialIcons name={getAmenityIcon(item) as any} size={16} color="#004aad" />
+                    </View>
+                    <Text style={styles.amenityText}>{item.trim()}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          <Text style={[styles.sectionHeader, { marginLeft: 20, marginTop: 10 }]}>SCHEDULE</Text>
+          <DailyTimeline schedules={filteredSchedules} onEventPress={handleEventPress} />
+        
+        </ScrollView>
+      </View>
 
       <TouchableOpacity style={styles.fab} activeOpacity={0.8} onPress={() => router.push({ pathname: '/admin/add-schedule', params: { roomId, roomName } } as any)}>
         <MaterialIcons name="add" size={28} color="#fff" />
@@ -124,36 +158,38 @@ export default function RoomDetails() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#e6f2ff' },
-  headerContainer: { backgroundColor: '#004aad', borderBottomLeftRadius: 30, borderBottomRightRadius: 30, paddingBottom: 20, marginBottom: 5, shadowColor: '#004aad', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 10 },
-  headerContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 10 },
-  backBtn: { padding: 8, backgroundColor: '#fff', borderRadius: 12, elevation: 3 },
+  rootContainer: { flex: 1, backgroundColor: '#004aad' },
+  headerContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingBottom: 10 },
+  backBtn: { padding: 8, backgroundColor: '#fff', borderRadius: 12 },
   headerTextContainer: { alignItems: 'center' },
-  headerTitle: { fontSize: 24, fontWeight: '800', color: '#ffffff' },
-  headerSubtitle: { fontSize: 14, color: '#dbeafe', opacity: 0.9, marginTop: 2 },
-  statusBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, marginHorizontal: 20, marginTop: 15, borderRadius: 16, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, elevation: 3, gap: 8 },
-  statusBannerText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  headerTitle: { fontSize: 20, fontWeight: '800', color: '#ffffff' },
+  headerSubtitle: { fontSize: 12, color: '#dbeafe', marginTop: 2 },
   
-  amenitiesContainer: { marginHorizontal: 20, marginTop: 20 },
-  sectionHeader: { fontSize: 14, fontWeight: '700', color: '#9ca3af', marginBottom: 8, letterSpacing: 1 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#bfdbfe' },
-  chipText: { fontSize: 12, fontWeight: '600', color: '#004aad' },
+  body: { flex: 1, backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 15 },
+  
+  statusBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, marginHorizontal: 20, marginBottom: 15, borderRadius: 12, gap: 6 },
+  statusBannerText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
 
-  list: { paddingHorizontal: 20, paddingBottom: 100 }, 
-  sectionTitle: { fontSize: 18, fontWeight: '700', marginBottom: 15, marginTop: 20, color: '#002855' },
-  emptyState: { alignItems: 'center', marginTop: 40 },
-  emptyText: { fontSize: 16, color: '#5b7c99', fontWeight: '600' },
-  card: { backgroundColor: '#fff', borderRadius: 16, padding: 16, marginBottom: 12, flexDirection: 'row', alignItems: 'center', shadowColor: '#004aad', shadowOpacity: 0.08, shadowRadius: 8, elevation: 2 },
-  timeBox: { alignItems: 'center', justifyContent: 'center', marginRight: 16, width: 75, borderRightWidth: 1, borderRightColor: '#f0f9ff', paddingRight: 10 },
-  timeText: { fontWeight: 'bold', color: '#002855', fontSize: 13, textAlign: 'center' },
-  timeSub: { fontSize: 10, color: '#9ca3af', marginVertical: 2 },
-  details: { flex: 1, paddingLeft: 6 },
-  subject: { fontSize: 16, fontWeight: 'bold', color: '#004aad' },
-  prof: { fontSize: 14, color: '#5b7c99', marginTop: 2 },
-  dayContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 4 },
-  dayBadge: { fontSize: 12, color: '#5b7c99', fontWeight: '500' },
-  deleteBtn: { padding: 8 },
-  fab: { position: 'absolute', bottom: 30, right: 24, backgroundColor: '#004aad', flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 24, borderRadius: 32, elevation: 8, shadowColor: '#004aad', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8 },
+  /* Amenities Styles */
+  sectionContainer: { marginHorizontal: 20, marginBottom: 10, backgroundColor: '#f8fafc', padding: 15, borderRadius: 16 },
+  sectionHeader: { fontSize: 12, fontWeight: '800', color: '#94a3b8', marginBottom: 10, letterSpacing: 0.5 },
+  amenitiesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  amenityChip: { 
+    flexDirection: 'row', alignItems: 'center', 
+    backgroundColor: '#ffffff', 
+    paddingVertical: 6, paddingRight: 12, paddingLeft: 6, 
+    borderRadius: 20, 
+    borderWidth: 1, borderColor: '#e2e8f0',
+    shadowColor: '#000', shadowOpacity: 0.03, shadowRadius: 2, shadowOffset: {width:0, height:1}
+  },
+  amenityIconBox: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: '#e0f2fe', 
+    justifyContent: 'center', alignItems: 'center',
+    marginRight: 8
+  },
+  amenityText: { fontSize: 12, fontWeight: '600', color: '#334155' },
+
+  fab: { position: 'absolute', bottom: 30, right: 24, backgroundColor: '#004aad', flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 24, borderRadius: 32, elevation: 8 },
   fabText: { color: '#fff', fontWeight: 'bold', fontSize: 16, marginLeft: 8 }
 });
