@@ -40,7 +40,8 @@ export default function Index() {
             activeOpacity={0.8}
           >
             <Text style={styles.btnTextWhite}>Log In</Text>
-            <MaterialIcons name="arrow-forward" size={20} color="#fff" style={styles.btnIconRight} />
+                      <Text style={styles.footerText}>Developed By Marl Laurence Soriano</Text>
+
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -54,7 +55,9 @@ export default function Index() {
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.footerText}>v1.0.0 • Developed By Marl</Text>
+          <Text style={styles.footerText}>Developed By Marl Laurence Soriano</Text>
+      
+
         </View>
 
       </View>
