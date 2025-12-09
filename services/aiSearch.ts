@@ -1,6 +1,6 @@
 // services/aiSearch.ts
 
-const API_KEY = 'AIzaSyBTZ5EsdKi2oP4MPwsxmAEF80KvK5KdH_M'; 
+const API_KEY = ''; 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 let cachedModel: string | null = null;
