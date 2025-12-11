@@ -1,32 +1,25 @@
-// services/aiSearch.ts
-
-// ✅ Read from .env
 const API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY; 
-
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+let activeModel: string | null = null;
 
-let cachedModel: string | null = null;
-
-// --- INTERFACES ---
 export interface SearchIntent {
-  day?: string;
-  filterType?: string;
-  searchKeyword?: string;
-  timeStart?: number; 
-  timeEnd?: number;   
-  minCapacity?: number;    
-  equipment?: string[];    
-  targetStatus?: string;   
+  day?: string | null;
+  filterType?: string | null;
+  searchKeyword?: string | null;
+  timeStart?: number | null;
+  timeEnd?: number | null;
+  equipment?: string[] | null;
+  targetStatus?: string | null;
 }
 
 export interface BookingIntent {
-  subject?: string;
-  roomName?: string;
-  day?: string;
-  startTime?: string;
-  endTime?: string;
-  professor?: string;
-  capacity?: number;
+  subject?: string | null;
+  roomName?: string | null;
+  day?: string | null;
+  startTime?: string | null;
+  endTime?: string | null;
+  professor?: string | null;
+  capacity?: number | null;
 }
 
 export interface MaintenanceAnalysis {
@@ -36,112 +29,151 @@ export interface MaintenanceAnalysis {
   suggestedAction: string;
 }
 
-// --- DYNAMIC MODEL FINDER ---
-const getBestModel = async (): Promise<string> => {
-  if (cachedModel) return cachedModel;
-  try {
-    const response = await fetch(`${BASE_URL}/models?key=${API_KEY}`);
-    const data = await response.json();
-    if (data.models) {
-      const preferred = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-      let found = data.models.find((m: any) => preferred.some(p => m.name.includes(p)) && m.supportedGenerationMethods.includes('generateContent'));
-      
-      if (!found) {
-        found = data.models.find((m: any) => m.supportedGenerationMethods.includes('generateContent'));
-      }
-      
-      if (found) {
-        const modelName = found.name.replace('models/', '');
-        cachedModel = modelName;
-        return modelName;
-      }
-    }
-  } catch (e) { console.error("Error listing models:", e); }
-  return 'gemini-pro'; 
-};
-
-// --- HELPER: JSON EXTRACTION ---
+// --- Helper to safely extract JSON from text ---
 const extractJson = (text: string) => {
   try {
-    let cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const firstOpen = cleanText.indexOf('{');
-    const lastClose = cleanText.lastIndexOf('}');
-    if (firstOpen !== -1 && lastClose !== -1) {
-      cleanText = cleanText.substring(firstOpen, lastClose + 1);
-      return JSON.parse(cleanText);
-    }
-    return null;
-  } catch (e) {
-    console.error("JSON Parse Error:", text);
-    return null;
-  }
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+  } catch (e) {}
+  return null;
 };
 
-// --- CORE API CALLER ---
-const callGemini = async (promptText: string) => {
+// --- Get the best available model ---
+const getBestWorkingModel = async () => {
+  if (activeModel) return activeModel;
+
+  const priorityList = [
+    'gemini-2.5-flash', 
+    'gemini-2.0-flash', 
+    'gemini-pro', 
+    'gemini-1.5-flash'
+  ];
+
   try {
-    const model = await getBestModel();
-    const response = await fetch(`${BASE_URL}/models/${model}:generateContent?key=${API_KEY}`, {
+    const listUrl = `${BASE_URL}/models?key=${API_KEY}`;
+    const response = await fetch(listUrl);
+    const data = await response.json();
+
+    if (data.models) {
+      const found = data.models.find((m: any) => 
+        priorityList.some(p => m.name.includes(p)) &&
+        m.supportedGenerationMethods.includes('generateContent')
+      );
+
+      if (found) {
+        const name = found.name.replace('models/', '');
+        activeModel = name;
+        return name;
+      }
+    }
+  } catch (e) {}
+
+  activeModel = 'gemini-pro'; // fallback
+  return activeModel;
+};
+
+// --- Call Gemini API and parse JSON safely ---
+const callGemini = async (promptText: string) => {
+  if (!API_KEY) return null;
+
+  const modelName = await getBestWorkingModel();
+  const url = `${BASE_URL}/models/${modelName}:generateContent?key=${API_KEY}`;
+
+  try {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] }),
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: promptText }] }]
+      }),
     });
-    
+
     const data = await response.json();
-    
-    if (data.error) {
-      console.error("🔴 API Error:", data.error.message);
-      return null;
-    }
+
+    if (data.error) return null;
 
     if (data.candidates && data.candidates.length > 0) {
       const text = data.candidates[0].content.parts[0].text;
-      return extractJson(text);
+      const result = extractJson(text);
+      return result;
     }
+
     return null;
-  } catch (e) { return null; }
+  } catch (e) { 
+    return null; 
+  }
 };
 
-// --- EXPORTED FUNCTIONS ---
-export const parseNaturalQuery = async (query: string): Promise<SearchIntent | null> => {
+// --- Parse search filters from natural query ---
+export const parseNaturalQuery = async (query: string): Promise<SearchIntent> => {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const today = days[new Date().getDay()];
+
   const prompt = `
-    Context: Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long' })}.
-    User Query: "${query}"
-    Task: Extract search requirements.
-    Ref Data: Types: ['Lecture Hall', 'Laboratory', 'Computer Lab', 'Seminar Room', 'Auditorium', 'Conference Room']
-    Rules:
-    1. 'day': Convert relative (tomorrow) to strict Day string.
-    2. 'filterType': Fuzzy match to Types. If "room"/"any"/"empty", return "All".
-    3. 'searchKeyword': Specific names (e.g. "CL5").
-    4. 'timeStart'/'timeEnd': 24h numbers. "12pm" = start:12, end:13.
-    5. 'targetStatus': "Available" (default), "Maintenance".
-    
-    OUTPUT RAW JSON ONLY:
-    { "day": "Monday"|null, "filterType": "string"|null, "searchKeyword": "string"|null, "timeStart": number|null, "timeEnd": number|null, "targetStatus": "Available"|null }
-  `;
-  return await callGemini(prompt);
+Context: Today is ${today}. User Query: "${query}"
+Task: Extract search filters from the query.
+Rules:
+- Respond ONLY with a JSON object.
+- Do NOT write explanations.
+- If a field cannot be extracted, set it to null.
+
+JSON FORMAT:
+{ 
+  "day": "string or null", 
+  "filterType": "string or null", 
+  "searchKeyword": "string or null", 
+  "timeStart": number or null, 
+  "timeEnd": number or null, 
+  "targetStatus": "Available" or null 
+}
+`;
+
+  const result = await callGemini(prompt);
+  return result ?? { day: null, filterType: null, searchKeyword: null, timeStart: null, timeEnd: null, targetStatus: null };
 };
 
-export const parseBookingIntent = async (query: string): Promise<BookingIntent | null> => {
+// --- Parse booking intent from natural query ---
+export const parseBookingIntent = async (query: string): Promise<BookingIntent> => {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const today = days[new Date().getDay()];
+
   const prompt = `
-    Context: Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long' })}.
-    User Query: "${query}"
-    Task: Extract schedule details.
-    OUTPUT RAW JSON ONLY:
-    { "subject": "string"|null, "roomName": "string"|null, "day": "string"|null, "startTime": "string"|null, "endTime": "string"|null, "professor": "string"|null }
-  `;
-  return await callGemini(prompt);
+Context: Today is ${today}. User Query: "${query}"
+Task: Extract schedule details for booking.
+Rules:
+- Respond ONLY with a JSON object.
+- Do NOT write explanations.
+- If a field cannot be extracted, set it to null.
+
+JSON FORMAT:
+{ 
+  "subject": "string or null", 
+  "roomName": "string or null", 
+  "day": "string or null", 
+  "startTime": "string or null", 
+  "endTime": "string or null", 
+  "professor": "string or null" 
+}
+`;
+
+  const result = await callGemini(prompt);
+  return result ?? { subject: null, roomName: null, day: null, startTime: null, endTime: null, professor: null };
 };
 
+// --- Analyze maintenance issue ---
 export const analyzeMaintenanceIssue = async (description: string): Promise<MaintenanceAnalysis | null> => {
   const prompt = `
-    User Report: "${description}"
-    Task: Analyze issue.
-    Rules:
-    1. Category: Electrical, Plumbing, HVAC, Equipment, Cleaning, Other.
-    2. Urgency: Low, Medium, High, Critical.
-    OUTPUT RAW JSON ONLY:
-    { "category": "Equipment", "urgency": "Medium", "summary": "string", "suggestedAction": "string" }
-  `;
-  return await callGemini(prompt);
+User Report: "${description}"
+Task: Analyze the issue.
+Rules:
+- Respond ONLY with a JSON object.
+- Do NOT write explanations.
+- If a field cannot be determined, set it to "Unknown".
+
+JSON FORMAT:
+{ "category": "string", "urgency": "string", "summary": "string", "suggestedAction": "string" }
+`;
+
+  const result = await callGemini(prompt);
+  return result ?? { category: "Unknown", urgency: "Unknown", summary: "Unknown", suggestedAction: "Unknown" };
 };

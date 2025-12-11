@@ -17,7 +17,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import ClassActionModal from '../../components/ClassActionModal';
 import CustomModal from '../../components/CustomModal';
 import WeekCalendar from '../../components/WeekCalendar';
-import { parseNaturalQuery } from '../../services/aiSearch';
+// Import SearchIntent for type safety and the parsing function
+import { parseNaturalQuery, SearchIntent } from '../../services/aiSearch';
 import { deleteClassroom, getClassrooms } from '../../services/classroom';
 import { deleteSchedule, getSchedulesByDay } from '../../services/schedule';
 import { getRoomStatus } from '../../services/status';
@@ -108,14 +109,72 @@ export default function AdminDashboard() {
 
   const onRefresh = () => { setRefreshing(true); loadRooms(); setRefreshing(false); };
 
-  const applyFilters = (searchText: string, filterType: string, sourceData = rooms) => {
+  // --- HELPER: Parse HH:MM AM/PM string to a decimal hour (e.g., 9:30 AM -> 9.5) ---
+  const parseTime = (timeStr: string) => {
+    if (!timeStr) return 0;
+    const [time, modifier] = timeStr.split(' ');
+    let [hours, minutes] = time.split(':').map(Number);
+    if (hours === 12 && modifier === 'AM') hours = 0;
+    if (hours !== 12 && modifier === 'PM') hours += 12;
+    return hours + minutes / 60;
+  };
+  
+  // --- ADVANCED FILTERING LOGIC (Updated for AI) ---
+  const applyFilters = (
+    searchText: string, 
+    filterType: string, 
+    sourceData = rooms,
+    aiIntent: SearchIntent = {} // NEW: Default empty intent
+  ) => {
     let result = sourceData;
+
+    // 1. Filter by Type
     if (filterType !== 'All') {
       result = result.filter(room => room.type.toLowerCase().includes(filterType.toLowerCase()));
     }
+    
+    // 2. Filter by Search Text (Name)
     if (searchText) {
-      result = result.filter(room => room.name.toLowerCase().includes(searchText.toLowerCase()) || room.type.toLowerCase().includes(searchText.toLowerCase()));
+      result = result.filter(room => 
+        room.name.toLowerCase().includes(searchText.toLowerCase()) || 
+        room.type.toLowerCase().includes(searchText.toLowerCase())
+      );
     }
+    
+    // 3. Filter by Time Availability (AI)
+    if (aiIntent.timeStart !== null && aiIntent.timeEnd !== null && aiIntent.timeStart !== undefined) {
+      const searchStart = aiIntent.timeStart;
+      const searchEnd = aiIntent.timeEnd || searchStart + 1; // Default to 1 hour search
+
+      result = result.filter(room => {
+        // If room has no schedule, it's definitely free
+        if (!room.dailySchedule || room.dailySchedule.length === 0) return true;
+
+        // Check if ANY class overlaps with the requested time
+        const hasConflict = room.dailySchedule.some((sch: any) => {
+          const classStart = parseTime(sch.startTime);
+          const classEnd = parseTime(sch.endTime);
+
+          // Conflict Logic: (SearchStart < ClassEnd) and (SearchEnd > ClassStart)
+          return (searchStart < classEnd) && (searchEnd > classStart);
+        });
+
+        // If conflict exists, exclude room. User wants a FREE room.
+        return !hasConflict;
+      });
+    }
+
+    // 4. Filter by Status (AI)
+    if (aiIntent.targetStatus) {
+      // Check if targetStatus is NOT null/undefined before using it
+      const targetStatusLower = aiIntent.targetStatus.toLowerCase(); 
+      
+      result = result.filter(room => 
+        // Compare the room's current status (default to 'available') against the AI's target status
+        (room.status || 'Available').toLowerCase() === targetStatusLower
+      );
+    }
+
     setFilteredRooms(result);
   };
 
@@ -127,19 +186,36 @@ export default function AdminDashboard() {
     if (!search.trim()) return;
     
     setIsAiLoading(true);
-    const result = await parseNaturalQuery(search);
+    // Removed old delay logic to prevent quota errors
+    const result = await parseNaturalQuery(search); 
     setIsAiLoading(false);
 
     if (result) {
+      // 1. Day
       if (result.day) setSelectedDay(result.day);
-      if (result.filterType && FILTER_TYPES.includes(result.filterType)) {
-        setSelectedFilter(result.filterType);
-        applyFilters(result.searchKeyword || '', result.filterType);
-      } else {
-        applyFilters(result.searchKeyword || '', selectedFilter);
+      
+      // 2. Filter Type
+      let newFilter = selectedFilter;
+      if (result.filterType && FILTER_TYPES.includes(result.filterType) || result.filterType === 'All') {
+        newFilter = result.filterType;
+        setSelectedFilter(newFilter);
       }
-      if (result.searchKeyword) setSearch(result.searchKeyword);
+
+      // 3. Keyword
+      const keyword = result.searchKeyword || '';
+      if (keyword) setSearch(keyword);
       else setSearch('');
+
+      // 4. Advanced Params (Time and Status)
+      const aiIntent: SearchIntent = {
+        timeStart: result.timeStart,
+        timeEnd: result.timeEnd,
+        targetStatus: result.targetStatus
+      };
+
+      // Apply all filters at once
+      applyFilters(keyword, newFilter, rooms, aiIntent);
+
     } else {
       Alert.alert("AI Error", "Could not understand the query. Please try again.");
     }
@@ -217,15 +293,6 @@ export default function AdminDashboard() {
     } as any);
   };
 
-  const parseTime = (timeStr: string) => {
-    if (!timeStr) return 0;
-    const [time, modifier] = timeStr.split(' ');
-    let [hours, minutes] = time.split(':').map(Number);
-    if (hours === 12 && modifier === 'AM') hours = 0;
-    if (hours !== 12 && modifier === 'PM') hours += 12;
-    return hours + minutes / 60;
-  };
-
   const getRoomIcon = (type: string) => {
     const t = type.toLowerCase();
     if (t.includes('computer')) return <MaterialIcons name="computer" size={18} color={COLORS.primary} />;
@@ -234,6 +301,7 @@ export default function AdminDashboard() {
     return <MaterialIcons name="room" size={18} color={COLORS.primary} />;
   };
 
+  // --- RENDER SCHEDULER (WITH STICKY HEADER FIX) ---
   const renderScheduler = () => {
     const hours = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => START_HOUR + i);
     const currentHour = currentTime.getHours() + currentTime.getMinutes() / 60;
@@ -242,137 +310,152 @@ export default function AdminDashboard() {
 
     return (
       <View style={styles.schedulerContainer}>
-        {/* 1. Left Fixed Column: Time Labels */}
-        <View style={styles.timeColumn}>
-           <View style={{ height: 70, borderBottomWidth: 1, borderBottomColor: COLORS.gridLine, backgroundColor: '#fff' }} /> 
-           {hours.map((hour) => (
-             <View key={hour} style={styles.timeLabelContainer}>
-               <Text style={styles.timeLabel}>
-                 {hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}
-               </Text>
-             </View>
-           ))}
+        
+        {/* 1. FIXED HEADER ROW (The Classroom Headers) */}
+        <View style={styles.fixedHeaderRow}>
+            {/* 1a. Top-Left Corner Spacer */}
+            <View style={styles.timeColumnHeader} /> 
+            
+            {/* 1b. Room Headers (Scrollable Horizontally) */}
+            <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
+                <View style={styles.roomHeaderRow}>
+                    {filteredRooms.map((room) => (
+                        <View key={room.id} style={styles.roomHeaderCell}>
+                            <View style={styles.headerTopRow}>
+                                <View style={styles.roomIconBg}>{getRoomIcon(room.type)}</View>
+                                <View style={styles.headerActions}>
+                                    <TouchableOpacity onPress={() => router.push({ pathname: '/admin/add-room', params: room } as any)} style={styles.miniIconBtn}>
+                                        <MaterialIcons name="edit" size={14} color="#6b7280" />
+                                    </TouchableOpacity>
+                                    <TouchableOpacity onPress={() => handleDeleteRoomPress(room.id)} style={styles.miniIconBtn}>
+                                        <MaterialIcons name="delete" size={14} color="#ef4444" />
+                                    </TouchableOpacity>
+                                </View>
+                            </View>
+                            
+                            <TouchableOpacity onPress={() => router.push({ pathname: '/admin/room-details', params: { roomId: room.id, roomName: room.name, roomCapacity: room.capacity, roomType: room.type, equipment: room.equipment } } as any)}>
+                                <Text style={styles.roomHeaderText} numberOfLines={1}>{room.name}</Text>
+                                <Text style={styles.roomCapacityText}>{room.type} • {room.capacity} seats</Text>
+                            </TouchableOpacity>
+                        </View>
+                    ))}
+                </View>
+            </ScrollView>
         </View>
 
-        {/* 2. Right Scrollable Area: Rooms */}
-        <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
-           <View>
-             {/* Room Headers */}
-             <View style={styles.roomHeaderRow}>
-               {filteredRooms.map((room) => (
-                 <View key={room.id} style={styles.roomHeaderCell}>
-                   <View style={styles.headerTopRow}>
-                      <View style={styles.roomIconBg}>{getRoomIcon(room.type)}</View>
-                      <View style={styles.headerActions}>
-                         <TouchableOpacity onPress={() => router.push({ pathname: '/admin/add-room', params: room } as any)} style={styles.miniIconBtn}>
-                           <MaterialIcons name="edit" size={14} color="#6b7280" />
-                         </TouchableOpacity>
-                         <TouchableOpacity onPress={() => handleDeleteRoomPress(room.id)} style={styles.miniIconBtn}>
-                           <MaterialIcons name="delete" size={14} color="#ef4444" />
-                         </TouchableOpacity>
-                      </View>
-                   </View>
-                   
-                   <TouchableOpacity onPress={() => router.push({ pathname: '/admin/room-details', params: { roomId: room.id, roomName: room.name, roomCapacity: room.capacity, roomType: room.type, equipment: room.equipment } } as any)}>
-                     <Text style={styles.roomHeaderText} numberOfLines={1}>{room.name}</Text>
-                     <Text style={styles.roomCapacityText}>{room.type} • {room.capacity} seats</Text>
-                   </TouchableOpacity>
-                 </View>
-               ))}
-             </View>
-
-             {/* Grid Body */}
-             <View style={styles.gridBody}>
-                <View style={styles.gridLinesContainer}>
-                   {hours.map((h, i) => (
-                     <View key={i} style={styles.gridLine} />
-                   ))}
-                </View>
-                
-                <View style={styles.roomColumnsContainer}>
-                  {filteredRooms.map((room) => {
-                    const isMaintenance = room.status === 'Maintenance';
-                    return (
-                      <View key={room.id} style={styles.roomColumn}>
-                         
-                         {/* AVAILABLE SLOTS */}
-                         {!isMaintenance && (
-                           <View style={[StyleSheet.absoluteFill, { backgroundColor: COLORS.availableBg }]}>
-                             {hours.map((h, i) => (
-                               <View key={i} style={{ height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.availableBorder, borderStyle: 'dashed' }} />
-                             ))}
-                           </View>
-                         )}
-
-                         {/* ADD CLASS TOUCH TARGETS */}
-                         {!isMaintenance && hours.map((hour) => (
-                           <TouchableOpacity 
-                              key={hour}
-                              style={[styles.emptySlotClickable, { height: HOUR_HEIGHT }]}
-                              onPress={() => handleAddClassToSlot(room, hour)}
-                              activeOpacity={0.6}
-                           />
-                         ))}
-
-                         {/* MAINTENANCE OVERLAY */}
-                         {isMaintenance && (
-                           <View style={styles.maintenanceOverlay}>
-                             <View style={styles.maintenanceBadge}>
-                                <MaterialIcons name="build" size={16} color={COLORS.maintenanceText} />
-                                <Text style={styles.maintenanceText}>Maintenance</Text>
-                             </View>
-                           </View>
-                         )}
-
-                         {/* OCCUPIED CLASS BLOCKS */}
-                         {!isMaintenance && room.dailySchedule && room.dailySchedule.map((sch: any, index: number) => {
-                            const start = parseTime(sch.startTime);
-                            const end = parseTime(sch.endTime);
-                            if (start < START_HOUR || start > END_HOUR) return null;
-
-                            const top = (start - START_HOUR) * HOUR_HEIGHT;
-                            const height = (end - start) * HOUR_HEIGHT;
-
-                            return (
-                              <TouchableOpacity 
-                                key={index} 
-                                style={[styles.eventBlock, { top: top, height: height }]}
-                                onPress={() => handleClassPress(room, sch)}
-                                activeOpacity={0.9}
-                              >
-                                <View style={styles.eventContent}>
-                                  <Text style={styles.eventTitle} numberOfLines={1}>{sch.subject}</Text>
-                                  <View style={styles.eventDetailRow}>
-                                    <MaterialIcons name="person" size={12} color="rgba(255,255,255,0.9)" />
-                                    <Text style={styles.eventDetailText} numberOfLines={1}>
-                                      {sch.professor || "TBD"} 
-                                    </Text>
-                                  </View>
-                                  <View style={styles.eventDetailRow}>
-                                     <MaterialIcons name="access-time" size={12} color="rgba(255,255,255,0.8)" />
-                                     <Text style={styles.eventDetailText}>
-                                       {sch.startTime} - {sch.endTime}
-                                     </Text>
-                                  </View>
-                                </View>
-                              </TouchableOpacity>
-                            );
-                         })}
-                      </View>
-                    );
-                  })}
+        {/* 2. SCROLLABLE BODY (Vertical Scroll) */}
+        <ScrollView 
+            style={{ flex: 1 }} 
+            showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+            contentContainerStyle={{ paddingBottom: 80 }} 
+        >
+            <View style={styles.scrollableBody}>
+                {/* 2a. Left Fixed Column: Time Labels */}
+                <View style={styles.timeColumnBody}> 
+                    {hours.map((hour) => (
+                        <View key={hour} style={styles.timeLabelContainer}>
+                            <Text style={styles.timeLabel}>
+                                {hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}
+                            </Text>
+                        </View>
+                    ))}
                 </View>
 
-                {/* NOW LINE */}
-                {showCurrentLine && (
-                  <View style={[styles.currentLine, { top: currentLineTop }]}>
-                    <View style={styles.nowBadge}>
-                      <Text style={styles.nowText}>NOW</Text>
+                {/* 2b. Right Scrollable Area: Rooms Grid */}
+                <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
+                    <View style={styles.gridBody}>
+                        <View style={styles.gridLinesContainer}>
+                            {hours.map((h, i) => (
+                                <View key={i} style={styles.gridLine} />
+                            ))}
+                        </View>
+                        
+                        <View style={styles.roomColumnsContainer}>
+                            {filteredRooms.map((room) => {
+                                const isMaintenance = room.status === 'Maintenance';
+                                return (
+                                    <View key={room.id} style={styles.roomColumn}>
+                                        
+                                        {/* AVAILABLE SLOTS & TARGETS */}
+                                         {!isMaintenance && (
+                                           <View style={[StyleSheet.absoluteFill, { backgroundColor: COLORS.availableBg }]}>
+                                             {hours.map((h, i) => (
+                                               <View key={i} style={{ height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.availableBorder, borderStyle: 'dashed' }} />
+                                             ))}
+                                           </View>
+                                         )}
+
+                                         {/* ADD CLASS TOUCH TARGETS */}
+                                         {!isMaintenance && hours.map((hour) => (
+                                           <TouchableOpacity 
+                                              key={hour}
+                                              style={[styles.emptySlotClickable, { height: HOUR_HEIGHT }]}
+                                              onPress={() => handleAddClassToSlot(room, hour)}
+                                              activeOpacity={0.6}
+                                           />
+                                         ))}
+
+                                         {/* MAINTENANCE OVERLAY */}
+                                         {isMaintenance && (
+                                           <View style={styles.maintenanceOverlay}>
+                                             <View style={styles.maintenanceBadge}>
+                                                <MaterialIcons name="build" size={16} color={COLORS.maintenanceText} />
+                                                <Text style={styles.maintenanceText}>Maintenance</Text>
+                                             </View>
+                                           </View>
+                                         )}
+
+                                         {/* OCCUPIED CLASS BLOCKS */}
+                                         {!isMaintenance && room.dailySchedule && room.dailySchedule.map((sch: any, index: number) => {
+                                            const start = parseTime(sch.startTime);
+                                            const end = parseTime(sch.endTime);
+                                            if (start < START_HOUR || start > END_HOUR) return null;
+
+                                            const top = (start - START_HOUR) * HOUR_HEIGHT;
+                                            const height = (end - start) * HOUR_HEIGHT;
+
+                                            return (
+                                              <TouchableOpacity 
+                                                key={index} 
+                                                style={[styles.eventBlock, { top: top, height: height }]}
+                                                onPress={() => handleClassPress(room, sch)}
+                                                activeOpacity={0.9}
+                                              >
+                                                <View style={styles.eventContent}>
+                                                  <Text style={styles.eventTitle} numberOfLines={1}>{sch.subject}</Text>
+                                                  <View style={styles.eventDetailRow}>
+                                                    <MaterialIcons name="person" size={12} color="rgba(255,255,255,0.9)" />
+                                                    <Text style={styles.eventDetailText} numberOfLines={1}>
+                                                      {sch.professor || "TBD"} 
+                                                    </Text>
+                                                  </View>
+                                                  <View style={styles.eventDetailRow}>
+                                                     <MaterialIcons name="access-time" size={12} color="rgba(255,255,255,0.8)" />
+                                                     <Text style={styles.eventDetailText}>
+                                                       {sch.startTime} - {sch.endTime}
+                                                     </Text>
+                                                  </View>
+                                                </View>
+                                              </TouchableOpacity>
+                                            );
+                                         })}
+                                    </View>
+                                );
+                            })}
+                        </View>
+
+                        {/* NOW LINE */}
+                        {showCurrentLine && (
+                          <View style={[styles.currentLine, { top: currentLineTop }]}>
+                            <View style={styles.nowBadge}>
+                              <Text style={styles.nowText}>NOW</Text>
+                            </View>
+                          </View>
+                        )}
                     </View>
-                  </View>
-                )}
-             </View>
-           </View>
+                </ScrollView>
+            </View>
         </ScrollView>
       </View>
     );
@@ -423,7 +506,7 @@ export default function AdminDashboard() {
           <MaterialIcons name="search" size={24} color="#38b6ff" style={styles.searchIcon} />
           <TextInput 
             style={styles.searchInput} 
-            placeholder="Ask AI (e.g., 'Labs free tomorrow')" 
+            placeholder="Ask AI (e.g., 'Labs free tomorrow afternoon')" 
             placeholderTextColor="#8fabc2" 
             value={search} 
             onChangeText={handleSearch} 
@@ -449,9 +532,8 @@ export default function AdminDashboard() {
 
         {/* Main Scheduler Grid */}
         <View style={styles.body}>
-           <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />} contentContainerStyle={{ paddingBottom: 80 }} showsVerticalScrollIndicator={false}>
-             {filteredRooms.length > 0 ? renderScheduler() : <View style={styles.emptyState}><MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" /><Text style={styles.emptyText}>No rooms found.</Text></View>}
-           </ScrollView>
+           {/* Note: The ScrollView/RefreshControl is now inside renderScheduler */}
+           {filteredRooms.length > 0 ? renderScheduler() : <View style={styles.emptyState}><MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" /><Text style={styles.emptyText}>No rooms found.</Text></View>}
         </View>
       </SafeAreaView>
 
@@ -484,9 +566,38 @@ const styles = StyleSheet.create({
   body: { flex: 1, backgroundColor: '#ffffff', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
 
   /* SCHEDULER LAYOUT */
-  schedulerContainer: { flexDirection: 'row' },
+  schedulerContainer: { flex: 1, flexDirection: 'column' }, 
+
+  // NEW STYLES FOR STICKY HEADER
+  fixedHeaderRow: { 
+    flexDirection: 'row', 
+    backgroundColor: COLORS.headerBg, 
+    borderBottomWidth: 1, 
+    borderBottomColor: COLORS.gridLine, 
+    zIndex: 100 
+  },
+  timeColumnHeader: { 
+    width: 60, 
+    height: 70, 
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    backgroundColor: '#fff' 
+  },
+  scrollableBody: { 
+    flexDirection: 'row', 
+    flex: 1,
+    backgroundColor: '#ffffffff'
+  },
+  timeColumnBody: { 
+    width: 60, 
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    backgroundColor: '#fff', 
+    zIndex: 50,
+    marginTop: 20, 
+  },
+  // END NEW STYLES
   
-  timeColumn: { width: 60, borderRightWidth: 1, borderRightColor: COLORS.gridLine, backgroundColor: '#fff', zIndex: 10 },
   timeLabelContainer: { height: HOUR_HEIGHT, justifyContent: 'flex-start', alignItems: 'flex-end', paddingRight: 8 },
   timeLabel: { fontSize: 11, color: COLORS.timeLabel, fontWeight: '500', transform: [{translateY: -8}] },
 
@@ -497,8 +608,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center', 
     borderRightWidth: 1, 
     borderRightColor: COLORS.gridLine, 
-    borderBottomWidth: 1, 
-    borderBottomColor: COLORS.gridLine, 
+    // Removed borderBottomWidth here as it's now in fixedHeaderRow
     paddingHorizontal: 10,
     paddingVertical: 8
   },

@@ -15,10 +15,10 @@ import {
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-// ✅ Import the correct User Reporting Modal
+// ✅ Import correct modal and service types
 import MaintenanceModal from '../../components/MaintenanceModal';
 import WeekCalendar from '../../components/WeekCalendar';
-import { parseNaturalQuery } from '../../services/aiSearch';
+import { parseNaturalQuery, SearchIntent } from '../../services/aiSearch';
 import { getClassrooms } from '../../services/classroom';
 import { getSchedulesByDay } from '../../services/schedule';
 import { getRoomStatus } from '../../services/status';
@@ -47,16 +47,13 @@ const COLORS = {
   gridLine: '#f0f0f0',
   timeLabel: '#9aa0a6',
   
-  // Available (Pastel Green)
   availableBg: '#f0fff4', 
   availableBorder: '#dcfce7',
 
-  // Occupied (Modern Red)
   occupiedBg: '#ef4444',     
   occupiedBorder: '#b91c1c', 
   occupiedText: '#ffffff',   
 
-  // Maintenance (Modern Orange)
   maintenanceBg: '#fff7ed',
   maintenanceText: '#c2410c',
   
@@ -106,8 +103,10 @@ export default function UserDashboard() {
     setBookmarks(newBookmarks);
     await AsyncStorage.setItem('user_bookmarks', JSON.stringify(newBookmarks));
     
+    // Re-apply filters if currently viewing 'Saved'
     if (selectedFilter === 'Saved') {
-       applyFilters(search, selectedFilter, rooms, newBookmarks);
+      // Pass empty intent to satisfy type checker
+       applyFilters(search, selectedFilter, rooms, newBookmarks, {});
     }
   };
 
@@ -119,14 +118,34 @@ export default function UserDashboard() {
       return { ...room, ...statusInfo, dailySchedule };
     });
     setRooms(roomsWithData);
-    applyFilters(search, selectedFilter, roomsWithData, bookmarks);
+    // Initial load with empty AI intent
+    applyFilters(search, selectedFilter, roomsWithData, bookmarks, {});
   };
 
   useFocusEffect(useCallback(() => { loadData(); }, [selectedDay, bookmarks])); 
   useEffect(() => { const interval = setInterval(loadData, 60000); return () => clearInterval(interval); }, [selectedDay]);
 
-  const applyFilters = (searchText: string, filterType: string, sourceData = rooms, currentBookmarks = bookmarks) => {
+  // --- PARSE TIME HELPER ---
+  const parseTime = (timeStr: string) => {
+    if (!timeStr) return 0;
+    const [time, modifier] = timeStr.split(' ');
+    let [hours, minutes] = time.split(':').map(Number);
+    if (hours === 12 && modifier === 'AM') hours = 0;
+    if (hours !== 12 && modifier === 'PM') hours += 12;
+    return hours + minutes / 60;
+  };
+
+  // --- ADVANCED FILTERING LOGIC ---
+  const applyFilters = (
+    searchText: string, 
+    filterType: string, 
+    sourceData = rooms, 
+    currentBookmarks = bookmarks,
+    aiIntent: SearchIntent = {} // Default empty object to prevent undefined errors
+  ) => {
     let result = sourceData;
+
+    // 1. Filter by Bookmarks / Type
     if (filterType === 'Saved') {
       result = result.filter(room => currentBookmarks.includes(room.id));
     } else if (filterType !== 'All') {
@@ -137,17 +156,44 @@ export default function UserDashboard() {
       });
     }
 
+    // 2. Filter by Search Text
     if (searchText) {
       result = result.filter(room => 
         room.name.toLowerCase().includes(searchText.toLowerCase()) ||
         (room.type && room.type.toLowerCase().includes(searchText.toLowerCase()))
       );
     }
+
+    // 3. Filter by Time Availability (AI)
+    if (aiIntent.timeStart !== null && aiIntent.timeEnd !== null && aiIntent.timeStart !== undefined) {
+      const searchStart = aiIntent.timeStart;
+      const searchEnd = aiIntent.timeEnd || searchStart + 1; 
+
+      result = result.filter(room => {
+        if (!room.dailySchedule || room.dailySchedule.length === 0) return true;
+        
+        const hasConflict = room.dailySchedule.some((sch: any) => {
+          const classStart = parseTime(sch.startTime);
+          const classEnd = parseTime(sch.endTime);
+          return (searchStart < classEnd) && (searchEnd > classStart);
+        });
+        return !hasConflict;
+      });
+    }
+
+    // 4. Filter by Status (AI) - With Null Check Fix
+    if (aiIntent.targetStatus) {
+      const targetStatusLower = aiIntent.targetStatus.toLowerCase();
+      result = result.filter(room => 
+        (room.status || 'Available').toLowerCase() === targetStatusLower
+      );
+    }
+
     setFilteredRooms(result);
   };
 
-  const handleSearch = (text: string) => { setSearch(text); applyFilters(text, selectedFilter); };
-  const handleFilterPress = (type: string) => { setSelectedFilter(type); applyFilters(search, type); };
+  const handleSearch = (text: string) => { setSearch(text); applyFilters(text, selectedFilter, rooms, bookmarks, {}); };
+  const handleFilterPress = (type: string) => { setSelectedFilter(type); applyFilters(search, type, rooms, bookmarks, {}); };
   const onRefresh = () => { setRefreshing(true); loadData(); setRefreshing(false); };
 
   // --- AI MAGIC SEARCH ---
@@ -159,27 +205,37 @@ export default function UserDashboard() {
     setIsAiLoading(false);
 
     if (result) {
+      // 1. Day
       if (result.day) setSelectedDay(result.day);
+      
+      // 2. Filter Type
+      let newFilter = selectedFilter;
       if (result.filterType && FILTER_TYPES.includes(result.filterType)) {
-        setSelectedFilter(result.filterType);
-        applyFilters(result.searchKeyword || '', result.filterType);
-      } else {
-        applyFilters(result.searchKeyword || '', selectedFilter);
+        newFilter = result.filterType;
+        setSelectedFilter(newFilter);
+      } else if (result.filterType === 'All') {
+        newFilter = 'All';
+        setSelectedFilter('All');
       }
-      if (result.searchKeyword) setSearch(result.searchKeyword);
+
+      // 3. Keyword
+      const keyword = result.searchKeyword || '';
+      if (keyword) setSearch(keyword);
       else setSearch('');
+
+      // 4. Advanced Params
+      const aiIntent: SearchIntent = {
+        timeStart: result.timeStart,
+        timeEnd: result.timeEnd,
+        targetStatus: result.targetStatus,
+        // Add other AI fields if needed (capacity, equipment)
+      };
+
+      applyFilters(keyword, newFilter, rooms, bookmarks, aiIntent);
+
     } else {
       Alert.alert("AI Assistant", "I couldn't understand that query. Try 'Empty labs tomorrow'.");
     }
-  };
-
-  const parseTime = (timeStr: string) => {
-    if (!timeStr) return 0;
-    const [time, modifier] = timeStr.split(' ');
-    let [hours, minutes] = time.split(':').map(Number);
-    if (hours === 12 && modifier === 'AM') hours = 0;
-    if (hours !== 12 && modifier === 'PM') hours += 12;
-    return hours + minutes / 60;
   };
 
   const getRoomIcon = (type: string) => {
@@ -191,6 +247,7 @@ export default function UserDashboard() {
     return <MaterialIcons name="room" size={18} color={COLORS.primary} />;
   };
 
+  // --- RENDER SCHEDULER (WITH STICKY HEADER FIX) ---
   const renderScheduler = () => {
     const hours = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => START_HOUR + i);
     const currentHour = currentTime.getHours() + currentTime.getMinutes() / 60;
@@ -199,132 +256,145 @@ export default function UserDashboard() {
 
     return (
       <View style={styles.schedulerContainer}>
-        {/* Time Labels */}
-        <View style={styles.timeColumn}>
-           <View style={{ height: 70, borderBottomWidth: 1, borderBottomColor: COLORS.gridLine, backgroundColor: '#fff' }} /> 
-           {hours.map((hour) => (
-             <View key={hour} style={styles.timeLabelContainer}>
-               <Text style={styles.timeLabel}>
-                 {hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}
-               </Text>
-             </View>
-           ))}
+        
+        {/* 1. FIXED HEADER ROW (Sticky Headers) */}
+        <View style={styles.fixedHeaderRow}>
+            {/* 1a. Top-Left Corner Spacer */}
+            <View style={styles.timeColumnHeader} /> 
+            
+            {/* 1b. Room Headers (Scrollable Horizontally) */}
+            <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
+                <View style={styles.roomHeaderRow}>
+                   {filteredRooms.map((room) => {
+                     const isBookmarked = bookmarks.includes(room.id);
+                     return (
+                       <View key={room.id} style={styles.roomHeaderCell}>
+                         <View style={styles.headerTopRow}>
+                            <View style={styles.roomIconBg}>{getRoomIcon(room.type)}</View>
+                            <TouchableOpacity onPress={() => toggleBookmark(room.id)} style={styles.miniIconBtn}>
+                               <MaterialIcons 
+                                  name={isBookmarked ? "bookmark" : "bookmark-border"} 
+                                  size={24} 
+                                  color={isBookmarked ? "#f59e0b" : "#9ca3af"} 
+                               />
+                            </TouchableOpacity>
+                         </View>
+                         <TouchableOpacity 
+                            onPress={() => router.push({ pathname: '/user/room-details', params: { roomId: room.id, roomName: room.name, roomType: room.type, roomCapacity: room.capacity, equipment: room.equipment } } as any)}
+                         >
+                           <Text style={styles.roomHeaderText} numberOfLines={1}>{room.name}</Text>
+                           <Text style={styles.roomCapacityText}>{room.type} • {room.capacity} seats</Text>
+                         </TouchableOpacity>
+                       </View>
+                     );
+                   })}
+                </View>
+            </ScrollView>
         </View>
 
-        {/* Room Grid */}
-        <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
-           <View>
-             {/* Headers */}
-             <View style={styles.roomHeaderRow}>
-               {filteredRooms.map((room) => {
-                 const isBookmarked = bookmarks.includes(room.id);
-                 return (
-                   <View key={room.id} style={styles.roomHeaderCell}>
-                     <View style={styles.headerTopRow}>
-                        <View style={styles.roomIconBg}>{getRoomIcon(room.type)}</View>
-                        <TouchableOpacity onPress={() => toggleBookmark(room.id)} style={styles.miniIconBtn}>
-                           <MaterialIcons 
-                              name={isBookmarked ? "bookmark" : "bookmark-border"} 
-                              size={24} 
-                              color={isBookmarked ? "#f59e0b" : "#9ca3af"} 
-                           />
-                        </TouchableOpacity>
-                     </View>
-                     <TouchableOpacity 
-                        onPress={() => router.push({ pathname: '/user/room-details', params: { roomId: room.id, roomName: room.name, roomType: room.type, roomCapacity: room.capacity, equipment: room.equipment } } as any)}
-                     >
-                       <Text style={styles.roomHeaderText} numberOfLines={1}>{room.name}</Text>
-                       <Text style={styles.roomCapacityText}>{room.type} • {room.capacity} seats</Text>
-                     </TouchableOpacity>
-                   </View>
-                 );
-               })}
-             </View>
-
-             {/* Grid Body */}
-             <View style={styles.gridBody}>
-                {/* Lines */}
-                <View style={styles.gridLinesContainer}>
-                   {hours.map((h, i) => (
-                     <View key={i} style={styles.gridLine} />
-                   ))}
+        {/* 2. SCROLLABLE BODY (Vertical Scroll) */}
+        <ScrollView 
+            style={{ flex: 1 }} 
+            showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+            contentContainerStyle={{ paddingBottom: 80 }} 
+        >
+            <View style={styles.scrollableBody}>
+                {/* 2a. Left Fixed Column: Time Labels (With Z-Index Fix) */}
+                <View style={styles.timeColumnBody}> 
+                    {hours.map((hour) => (
+                        <View key={hour} style={styles.timeLabelContainer}>
+                            <Text style={styles.timeLabel}>
+                                {hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}
+                            </Text>
+                        </View>
+                    ))}
                 </View>
-                
-                {/* Columns */}
-                <View style={styles.roomColumnsContainer}>
-                  {filteredRooms.map((room) => {
-                    const isMaintenance = room.status === 'Maintenance';
-                    return (
-                      <View key={room.id} style={styles.roomColumn}>
-                         
-                         {/* AVAILABLE SLOTS (Green) */}
-                         {!isMaintenance && (
-                           <View style={[StyleSheet.absoluteFill, { backgroundColor: COLORS.availableBg }]}>
-                             {hours.map((h, i) => (
-                               <View key={i} style={{ height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.availableBorder, borderStyle: 'dashed' }} />
-                             ))}
-                           </View>
-                         )}
 
-                         {/* Maintenance Overlay */}
-                         {isMaintenance && (
-                           <View style={styles.maintenanceOverlay}>
-                             <View style={styles.maintenanceBadge}>
-                                <MaterialIcons name="build" size={16} color={COLORS.maintenanceText} />
-                                <Text style={styles.maintenanceText}>Maintenance</Text>
-                             </View>
-                           </View>
-                         )}
-
-                         {/* OCCUPIED BLOCKS (Red) */}
-                         {!isMaintenance && room.dailySchedule && room.dailySchedule.map((sch: any, index: number) => {
-                            const start = parseTime(sch.startTime);
-                            const end = parseTime(sch.endTime);
-                            if (start < START_HOUR || start > END_HOUR) return null;
-
-                            const top = (start - START_HOUR) * HOUR_HEIGHT;
-                            const height = (end - start) * HOUR_HEIGHT;
-
+                {/* 2b. Right Scrollable Area: Rooms Grid */}
+                <ScrollView horizontal contentContainerStyle={{flexGrow: 1}} showsHorizontalScrollIndicator={false}>
+                    <View style={styles.gridBody}>
+                        <View style={styles.gridLinesContainer}>
+                            {hours.map((h, i) => (
+                                <View key={i} style={styles.gridLine} />
+                            ))}
+                        </View>
+                        
+                        <View style={styles.roomColumnsContainer}>
+                          {filteredRooms.map((room) => {
+                            const isMaintenance = room.status === 'Maintenance';
                             return (
-                              <TouchableOpacity 
-                                key={index} 
-                                style={[styles.eventBlock, { top: top, height: height }]}
-                                onPress={() => router.push({ pathname: '/user/room-details', params: { roomId: room.id, roomName: room.name, roomType: room.type, roomCapacity: room.capacity, equipment: room.equipment } } as any)}
-                                activeOpacity={0.9}
-                              >
-                                <View style={styles.eventContent}>
-                                  <Text style={styles.eventTitle} numberOfLines={1}>{sch.subject}</Text>
-                                  <View style={styles.eventDetailRow}>
-                                    <MaterialIcons name="person" size={12} color="rgba(255,255,255,0.9)" />
-                                    <Text style={styles.eventDetailText} numberOfLines={1}>
-                                      {sch.professor || "TBD"} 
-                                    </Text>
-                                  </View>
-                                  <View style={styles.eventDetailRow}>
-                                     <MaterialIcons name="access-time" size={12} color="rgba(255,255,255,0.8)" />
-                                     <Text style={styles.eventDetailText}>
-                                       {sch.startTime} - {sch.endTime}
-                                     </Text>
-                                  </View>
-                                </View>
-                              </TouchableOpacity>
-                            );
-                         })}
-                      </View>
-                    );
-                  })}
-                </View>
+                              <View key={room.id} style={styles.roomColumn}>
+                                 
+                                 {/* AVAILABLE SLOTS */}
+                                 {!isMaintenance && (
+                                   <View style={[StyleSheet.absoluteFill, { backgroundColor: COLORS.availableBg }]}>
+                                     {hours.map((h, i) => (
+                                       <View key={i} style={{ height: HOUR_HEIGHT, borderBottomWidth: 1, borderBottomColor: COLORS.availableBorder, borderStyle: 'dashed' }} />
+                                     ))}
+                                   </View>
+                                 )}
 
-                {/* Current Time Line */}
-                {showCurrentLine && (
-                  <View style={[styles.currentLine, { top: currentLineTop }]}>
-                    <View style={styles.nowBadge}>
-                      <Text style={styles.nowText}>NOW</Text>
+                                 {/* Maintenance Overlay */}
+                                 {isMaintenance && (
+                                   <View style={styles.maintenanceOverlay}>
+                                     <View style={styles.maintenanceBadge}>
+                                        <MaterialIcons name="build" size={16} color={COLORS.maintenanceText} />
+                                        <Text style={styles.maintenanceText}>Maintenance</Text>
+                                     </View>
+                                   </View>
+                                 )}
+
+                                 {/* OCCUPIED BLOCKS */}
+                                 {!isMaintenance && room.dailySchedule && room.dailySchedule.map((sch: any, index: number) => {
+                                    const start = parseTime(sch.startTime);
+                                    const end = parseTime(sch.endTime);
+                                    if (start < START_HOUR || start > END_HOUR) return null;
+
+                                    const top = (start - START_HOUR) * HOUR_HEIGHT;
+                                    const height = (end - start) * HOUR_HEIGHT;
+
+                                    return (
+                                      <TouchableOpacity 
+                                        key={index} 
+                                        style={[styles.eventBlock, { top: top, height: height }]}
+                                        onPress={() => router.push({ pathname: '/user/room-details', params: { roomId: room.id, roomName: room.name, roomType: room.type, roomCapacity: room.capacity, equipment: room.equipment } } as any)}
+                                        activeOpacity={0.9}
+                                      >
+                                        <View style={styles.eventContent}>
+                                          <Text style={styles.eventTitle} numberOfLines={1}>{sch.subject}</Text>
+                                          <View style={styles.eventDetailRow}>
+                                            <MaterialIcons name="person" size={12} color="rgba(255,255,255,0.9)" />
+                                            <Text style={styles.eventDetailText} numberOfLines={1}>
+                                              {sch.professor || "TBD"} 
+                                            </Text>
+                                          </View>
+                                          <View style={styles.eventDetailRow}>
+                                             <MaterialIcons name="access-time" size={12} color="rgba(255,255,255,0.8)" />
+                                             <Text style={styles.eventDetailText}>
+                                               {sch.startTime} - {sch.endTime}
+                                             </Text>
+                                          </View>
+                                        </View>
+                                      </TouchableOpacity>
+                                    );
+                                 })}
+                              </View>
+                            );
+                          })}
+                        </View>
+
+                        {/* Current Time Line */}
+                        {showCurrentLine && (
+                          <View style={[styles.currentLine, { top: currentLineTop }]}>
+                            <View style={styles.nowBadge}>
+                              <Text style={styles.nowText}>NOW</Text>
+                            </View>
+                          </View>
+                        )}
                     </View>
-                  </View>
-                )}
-             </View>
-           </View>
+                </ScrollView>
+            </View>
         </ScrollView>
       </View>
     );
@@ -387,20 +457,15 @@ export default function UserDashboard() {
         <WeekCalendar selectedDay={selectedDay} onSelectDay={setSelectedDay} />
 
         <View style={styles.body}>
-           <ScrollView 
-             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-             contentContainerStyle={{ paddingBottom: 80 }}
-             showsVerticalScrollIndicator={false}
-           >
-             {filteredRooms.length > 0 ? (
-                renderScheduler()
-             ) : (
-                <View style={styles.emptyState}>
-                   <MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" />
-                   <Text style={styles.emptyText}>No rooms found.</Text>
-                </View>
-             )}
-           </ScrollView>
+           {/* NOTE: ScrollView removed from here; now handled inside renderScheduler */}
+           {filteredRooms.length > 0 ? (
+              renderScheduler()
+           ) : (
+              <View style={styles.emptyState}>
+                 <MaterialIcons name="domain-disabled" size={60} color="#bfdbfe" />
+                 <Text style={styles.emptyText}>No rooms found.</Text>
+              </View>
+           )}
         </View>
       </SafeAreaView>
 
@@ -444,9 +509,42 @@ const styles = StyleSheet.create({
 
   body: { flex: 1, backgroundColor: '#ffffff', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
 
-  /* SCHEDULER LAYOUT */
-  schedulerContainer: { flexDirection: 'row' },
-  timeColumn: { width: 60, borderRightWidth: 1, borderRightColor: COLORS.gridLine, backgroundColor: '#fff', zIndex: 10 },
+  /* NEW SCHEDULER LAYOUT STYLES (MATCHING ADMIN) */
+  schedulerContainer: { flex: 1, flexDirection: 'column' }, // Column for fixed header
+  
+  fixedHeaderRow: { 
+    flexDirection: 'row', 
+    backgroundColor: COLORS.headerBg, 
+    borderBottomWidth: 1, 
+    borderBottomColor: COLORS.gridLine, 
+    zIndex: 100, // Keeps headers above everything
+    
+  },
+  timeColumnHeader: { 
+    width: 60, 
+    height: 70, // Matches roomHeaderCell height
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    backgroundColor: '#fff', 
+    marginTop: 20,
+  },
+  
+  scrollableBody: { 
+    flexDirection: 'row', 
+    flex: 1, 
+    backgroundColor: '#fff'
+  },
+  
+  timeColumnBody: { 
+    width: 60, 
+    borderRightWidth: 1, 
+    borderRightColor: COLORS.gridLine, 
+    backgroundColor: '#fff', 
+    zIndex: 50, // ✅ Z-INDEX FIX: Ensures time labels float above content
+    marginTop: 20,
+  },
+  /* END NEW STYLES */
+
   timeLabelContainer: { height: HOUR_HEIGHT, justifyContent: 'flex-start', alignItems: 'flex-end', paddingRight: 8 },
   timeLabel: { fontSize: 11, color: COLORS.timeLabel, fontWeight: '500', transform: [{translateY: -8}] },
 
@@ -457,8 +555,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center', 
     borderRightWidth: 1, 
     borderRightColor: COLORS.gridLine, 
-    borderBottomWidth: 1, 
-    borderBottomColor: COLORS.gridLine, 
+    // Removed bottom border here since it's on the container
     paddingHorizontal: 10,
     paddingVertical: 8
   },
